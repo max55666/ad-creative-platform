@@ -128,6 +128,57 @@ pnpm dev
 http://127.0.0.1:3100
 ```
 
+## Render 部署
+
+本專案已包含：
+
+- `Dockerfile`
+- `.dockerignore`
+- `render.yaml`
+
+Render 建議設定：
+
+- Environment：Docker
+- Persistent Disk mount path：`/app/public/uploads`
+- Start command：使用 Dockerfile 預設 CMD
+- `DATABASE_URL`：使用 Render Postgres 的 Internal Database URL
+
+必要環境變數：
+
+```env
+DATABASE_URL=""
+OPENAI_API_KEY=""
+OPENAI_MODEL="gpt-5.5"
+OPENAI_VISION_MODEL="gpt-4o-mini"
+OPENAI_IMAGE_MODEL="gpt-image-1"
+OPENAI_IMAGE_MAX_RETRIES="4"
+OPENAI_TRANSCRIBE_MODEL="gpt-4o-mini-transcribe"
+ELEVENLABS_API_KEY=""
+ELEVENLABS_VOICE_ID_MALE=""
+ELEVENLABS_VOICE_ID_FEMALE=""
+FFMPEG_PATH="ffmpeg"
+MAX_UPLOAD_MB="200"
+STORAGE_PROVIDER="local"
+JOB_AUTO_START="true"
+VIDEO_PROVIDER="kling"
+KLING_API_KEY=""
+KLING_API_BASE_URL="https://api.klingai.com"
+KLING_IMAGE_TO_VIDEO_PATH="/v1/videos/image2video"
+KLING_TASK_STATUS_PATH="/v1/videos/image2video/{taskId}"
+KLING_MODEL="kling-v1-6"
+KLING_MODE="std"
+KLING_CFG_SCALE="0.5"
+KLING_TIMEOUT_MS="600000"
+KLING_POLL_INTERVAL_MS="8000"
+```
+
+Docker 啟動時會自動執行：
+
+```bash
+pnpm prisma migrate deploy
+pnpm start
+```
+
 ## 測試
 
 ```bash

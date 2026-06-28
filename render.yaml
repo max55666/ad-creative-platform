@@ -1,0 +1,61 @@
+services:
+  - type: web
+    name: ad-creative-platform
+    env: docker
+    plan: starter
+    autoDeploy: true
+    disk:
+      name: uploads
+      mountPath: /app/public/uploads
+      sizeGB: 10
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STORAGE_PROVIDER
+        value: local
+      - key: MAX_UPLOAD_MB
+        value: "200"
+      - key: JOB_AUTO_START
+        value: "true"
+      - key: FFMPEG_PATH
+        value: ffmpeg
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.5
+      - key: OPENAI_VISION_MODEL
+        value: gpt-4o-mini
+      - key: OPENAI_IMAGE_MODEL
+        value: gpt-image-1
+      - key: OPENAI_IMAGE_MAX_RETRIES
+        value: "4"
+      - key: OPENAI_TRANSCRIBE_MODEL
+        value: gpt-4o-mini-transcribe
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID_MALE
+        sync: false
+      - key: ELEVENLABS_VOICE_ID_FEMALE
+        sync: false
+      - key: VIDEO_PROVIDER
+        value: kling
+      - key: KLING_API_KEY
+        sync: false
+      - key: KLING_API_BASE_URL
+        value: https://api.klingai.com
+      - key: KLING_IMAGE_TO_VIDEO_PATH
+        value: /v1/videos/image2video
+      - key: KLING_TASK_STATUS_PATH
+        value: /v1/videos/image2video/{taskId}
+      - key: KLING_MODEL
+        value: kling-v1-6
+      - key: KLING_MODE
+        value: std
+      - key: KLING_CFG_SCALE
+        value: "0.5"
+      - key: KLING_TIMEOUT_MS
+        value: "600000"
+      - key: KLING_POLL_INTERVAL_MS
+        value: "8000"
