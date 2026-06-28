@@ -1,4 +1,4 @@
-import { readFile } from "fs/promises";
+import { access, readFile } from "fs/promises";
 import path from "path";
 import JSZip from "jszip";
 import type { ProductAsset, Project } from "@prisma/client";
@@ -23,12 +23,25 @@ export async function submitProductLoraTraining({
   steps?: number;
   createMasks?: boolean;
 }) {
-  const assets = selectTrainingAssets(project, assetIds);
-  if (assets.length < 4) {
-    throw new Error("LoRA 訓練至少需要 4 張產品圖片，建議 15-30 張。");
+  const selectedAssets = selectTrainingAssets(project, assetIds);
+  const availableAssets = await filterExistingTrainingAssets(selectedAssets);
+
+  if (availableAssets.missing.length) {
+    await prisma.productLoraModel.update({
+      where: { id: modelId },
+      data: {
+        errorMessage: `有 ${availableAssets.missing.length} 張圖片在 Render 磁碟上找不到，已自動略過。遺失圖片通常是 Persistent Disk 設定前上傳的舊圖，請重新上傳產品圖。`
+      }
+    });
   }
 
-  const archive = await buildTrainingZip({ project, assets, triggerWord });
+  if (availableAssets.assets.length < 4) {
+    throw new Error(
+      `可用訓練圖片只有 ${availableAssets.assets.length} 張。LoRA 訓練至少需要 4 張，建議 15-30 張。請重新上傳產品圖片後再訓練。`
+    );
+  }
+
+  const archive = await buildTrainingZip({ project, assets: availableAssets.assets, triggerWord });
   const falClient = getFalClient();
   const archiveBlob = new Blob([Buffer.from(archive)], { type: "application/zip" });
   const archiveUrl = await falClient.storage.upload(archiveBlob, {
@@ -55,12 +68,13 @@ export async function submitProductLoraTraining({
       endpoint: FAL_FLUX_LORA_TRAINING_ENDPOINT,
       requestId: queued.request_id,
       dataArchiveUrl: archiveUrl,
-      trainingImageCount: assets.length,
-      assetIds: assets.map((asset) => asset.id),
+      trainingImageCount: availableAssets.assets.length,
+      assetIds: availableAssets.assets.map((asset) => asset.id),
       input: {
         ...input,
         images_data_url: archiveUrl,
-        selectedAssetIds: assets.map((asset) => asset.id)
+        selectedAssetIds: availableAssets.assets.map((asset) => asset.id),
+        missingAssetIds: availableAssets.missing.map((asset) => asset.id)
       } as any,
       errorMessage: null
     }
@@ -69,7 +83,7 @@ export async function submitProductLoraTraining({
 
 export async function syncProductLoraTraining(modelId: string) {
   const model = await prisma.productLoraModel.findUnique({ where: { id: modelId } });
-  if (!model?.requestId) throw new Error("This LoRA model has no fal request id yet.");
+  if (!model?.requestId) throw new Error("這個 LoRA 模型尚未送出 fal request id。");
 
   const falClient = getFalClient();
   const status = await falClient.queue.status(model.endpoint, { requestId: model.requestId, logs: true });
@@ -112,6 +126,23 @@ function selectTrainingAssets(project: ProjectWithAssets, assetIds?: string[]) {
   const imageAssets = project.assets.filter((asset) => asset.type === "image" && asset.fileUrl);
   const selected = wanted.size ? imageAssets.filter((asset) => wanted.has(asset.id)) : imageAssets;
   return selected.slice(0, 40);
+}
+
+async function filterExistingTrainingAssets(assets: ProductAsset[]) {
+  const existing: ProductAsset[] = [];
+  const missing: ProductAsset[] = [];
+
+  for (const asset of assets) {
+    if (!asset.fileUrl) continue;
+    try {
+      await access(getStorage().getLocalPath(asset.fileUrl));
+      existing.push(asset);
+    } catch {
+      missing.push(asset);
+    }
+  }
+
+  return { assets: existing, missing };
 }
 
 async function buildTrainingZip({

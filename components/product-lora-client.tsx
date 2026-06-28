@@ -53,7 +53,7 @@ export function ProductLoraClient({
       const completed = await pollJob(data.jobId, setJob);
       const model = completed.outputPayload?.model;
       if (model) setModels((current) => current.map((item) => (item.id === model.id ? model : item)));
-      setMessage("訓練任務已送到 fal.ai。接下來請按「同步狀態」檢查是否完成。");
+      setMessage("訓練任務已送到 fal.ai。訓練需要時間，稍後可按「同步狀態」檢查是否完成。");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "建立 LoRA 訓練任務失敗。");
     } finally {
@@ -129,7 +129,9 @@ export function ProductLoraClient({
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-medium">訓練圖片</p>
-                <p className="text-xs text-muted-foreground">至少 4 張，建議 15-30 張。角度越完整，產品越不容易跑掉。</p>
+                <p className="text-xs text-muted-foreground">
+                  至少 4 張，建議 15-30 張。若圖片預覽破圖或訓練時顯示找不到檔案，請重新上傳產品圖。
+                </p>
               </div>
               <Badge>{selectedAssetIds.length} 張已選</Badge>
             </div>
