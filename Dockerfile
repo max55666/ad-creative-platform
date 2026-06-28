@@ -24,4 +24,4 @@ RUN pnpm build
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "mkdir -p /app/public/uploads && pnpm prisma migrate deploy && pnpm start -- -H 0.0.0.0 -p ${PORT:-3000}"]
+CMD ["sh", "-c", "mkdir -p /app/public/uploads && pnpm prisma migrate deploy && pnpm exec next start -H 0.0.0.0 -p ${PORT:-3000}"]
