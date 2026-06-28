@@ -10,6 +10,7 @@ function normalizeKey(value: string) {
 
 function keyFromUrl(keyOrUrl: string) {
   const clean = keyOrUrl.split("?")[0];
+  if (clean.startsWith("/api/files/")) return clean.replace("/api/files/", "");
   if (clean.startsWith("/uploads/")) return clean.replace("/uploads/", "");
   return normalizeKey(clean);
 }
@@ -23,7 +24,7 @@ export const localStorageProvider: StorageProvider = {
   },
 
   getPublicUrl(key: string) {
-    return `/uploads/${normalizeKey(key)}`;
+    return `/api/files/${normalizeKey(key)}`;
   },
 
   getLocalPath(keyOrUrl: string) {

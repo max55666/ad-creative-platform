@@ -1,10 +1,8 @@
-import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { getStorage } from "@/lib/storage";
 import { analyzeAndUpdateReferenceAsset, normalizeReferenceKey } from "@/lib/services/reference-asset-service";
-
-const uploadRoot = path.join(process.cwd(), "public", "uploads");
 
 export async function POST(request: NextRequest) {
   const formData = await request.formData();
@@ -27,8 +25,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ message: `檔案超過上限 ${maxMb}MB` }, { status: 413 });
   }
 
-  await mkdir(uploadRoot, { recursive: true });
-
   const extension = path.extname(file.name) || mimeToExtension(file.type);
   const safeBase = path
     .basename(file.name, extension)
@@ -36,25 +32,27 @@ export async function POST(request: NextRequest) {
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
   const fileName = `${Date.now()}-${crypto.randomUUID()}-${safeBase || "asset"}${extension}`;
-  const filePath = path.join(uploadRoot, fileName);
   const buffer = Buffer.from(await file.arrayBuffer());
-
-  await writeFile(filePath, buffer);
-
-  const fileUrl = `/uploads/${fileName}`;
   const assetType = file.type.startsWith("video") ? "video" : "image";
+  const stored = await getStorage().put(buffer, {
+    directory: "",
+    fileName,
+    contentType: file.type || undefined
+  });
+  const fileUrl = stored.url;
   let asset = null;
 
   if (typeof projectId === "string" && projectId) {
     asset = await prisma.productAsset.create({
       data: {
         projectId,
-        type: assetType,
+        type: assetType as any,
         fileUrl,
         meta: {
           originalName: file.name,
           mimeType: file.type,
           size: file.size,
+          storageKey: stored.key,
           role: role || (assetType === "image" ? "product" : "other"),
           label: label || (assetType === "image" ? "主商品" : file.name),
           referenceKey: referenceKey || (assetType === "image" ? "main_product" : undefined),
@@ -87,6 +85,7 @@ function stringField(value: FormDataEntryValue | null) {
 
 function mimeToExtension(mimeType: string) {
   if (mimeType === "image/png") return ".png";
+  if (mimeType === "image/jpeg") return ".jpg";
   if (mimeType === "image/webp") return ".webp";
   if (mimeType === "image/gif") return ".gif";
   if (mimeType === "video/mp4") return ".mp4";

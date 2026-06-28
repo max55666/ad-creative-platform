@@ -197,6 +197,17 @@ ADMIN_PASSWORD="你的登入密碼"
 
 `AUTH_SECRET` 用來簽發登入 cookie；`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 是登入工作台的管理員帳密。
 
+### 上傳檔案保存
+
+Render Web Service 必須新增 Persistent Disk：
+
+```text
+Mount path: /app/public/uploads
+Size: 10 GB 或以上
+```
+
+否則圖片、影片、配音檔只會存在暫時容器裡，一旦重新部署就會破圖或找不到檔案。新上傳檔案會透過 `/api/files/...` 受登入保護的路由讀取。
+
 ## 測試
 
 ```bash
