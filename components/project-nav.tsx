@@ -1,14 +1,15 @@
 import Link from "next/link";
-import { BarChart3, FileText, Film, Image, LayoutTemplate, Wand2 } from "lucide-react";
+import { BarChart3, BrainCircuit, FileText, Film, Image, LayoutTemplate, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function ProjectNav({ projectId }: { projectId: string }) {
   const items = [
     { href: `/projects/${projectId}`, label: "分析報告", icon: FileText },
     { href: `/projects/${projectId}/static-creatives`, label: "平面素材", icon: Image },
-    { href: `/projects/${projectId}/video-scripts`, label: "影片腳本", icon: Film },
+    { href: `/projects/${projectId}/video-scripts`, label: "短影音", icon: Film },
     { href: `/projects/${projectId}/viral-analysis`, label: "爆款分析", icon: BarChart3 },
-    { href: `/projects/${projectId}/crowdfunding`, label: "募資頁", icon: LayoutTemplate }
+    { href: `/projects/${projectId}/crowdfunding`, label: "募資頁", icon: LayoutTemplate },
+    { href: `/projects/${projectId}/lora-models`, label: "產品模型", icon: BrainCircuit }
   ];
 
   return (

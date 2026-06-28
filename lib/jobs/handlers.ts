@@ -19,6 +19,7 @@ import { aiRouter } from "@/lib/ai/router";
 import { getStorage } from "@/lib/storage";
 import { publicUrlToPath, extractAudio, extractKeyframes, composeVideoFromImagesAudioSubtitles, composeVideoFromClipsAudioSubtitles } from "@/lib/services/video-processing";
 import { generateElevenLabsVoiceover, type VoiceGender, type VoiceLanguage } from "@/lib/services/elevenlabs";
+import { submitProductLoraTraining } from "@/lib/services/product-lora-training";
 import { scrapeProductPage } from "@/lib/services/web-scraper";
 import { JOB_TYPES, JobContext } from "@/lib/jobs/types";
 
@@ -50,9 +51,42 @@ export async function runJobHandler(context: JobContext) {
       return handleScrapeProduct(context);
     case JOB_TYPES.VIRAL_ANALYSIS:
       return handleViralAnalysis(context);
+    case JOB_TYPES.PRODUCT_LORA_TRAINING:
+      return handleProductLoraTraining(context);
     default:
       throw new Error(`Unsupported job type: ${job.type}`);
   }
+}
+
+async function handleProductLoraTraining({ jobId, projectId, input, progress }: JobContext) {
+  if (!projectId) throw new Error("projectId is required");
+  if (!input.modelId) throw new Error("modelId is required");
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    include: { assets: true }
+  });
+  if (!project) throw new Error("Project not found");
+  await progress(20);
+  const model = await submitProductLoraTraining({
+    modelId: input.modelId,
+    project,
+    assetIds: Array.isArray(input.assetIds) ? input.assetIds.map(String) : undefined,
+    triggerWord: String(input.triggerWord || ""),
+    steps: Number(input.steps || 1000),
+    createMasks: input.createMasks !== false
+  });
+  await progress(90);
+  await logUsage({
+    provider: "fal",
+    model: model.endpoint,
+    projectId,
+    userId: model.userId,
+    jobId,
+    imageCount: model.trainingImageCount,
+    status: "submitted"
+  });
+
+  return { model };
 }
 
 async function handleStaticCreativeImage({ jobId, projectId, userId, input, progress }: JobContext) {

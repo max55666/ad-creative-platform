@@ -7,7 +7,8 @@ export const JOB_TYPES = {
   EXTRACT_FRAMES: "extract_frames",
   PROCESS_IMAGE: "process_image",
   SCRAPE_PRODUCT: "scrape_product",
-  VIRAL_ANALYSIS: "viral_analysis"
+  VIRAL_ANALYSIS: "viral_analysis",
+  PRODUCT_LORA_TRAINING: "product_lora_training"
 } as const;
 
 export type JobType = (typeof JOB_TYPES)[keyof typeof JOB_TYPES];

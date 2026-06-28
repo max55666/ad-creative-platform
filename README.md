@@ -111,6 +111,10 @@ ELEVENLABS_API_KEY=""
 ELEVENLABS_VOICE_ID_MALE=""
 ELEVENLABS_VOICE_ID_FEMALE=""
 
+FAL_API_KEY=""
+FAL_KEY=""
+FAL_FLUX_LORA_TRAINING_ENDPOINT="fal-ai/flux-lora-fast-training"
+
 FFMPEG_PATH=""
 MAX_UPLOAD_MB="200"
 UPLOAD_IMAGE_MAX_WIDTH="1800"
@@ -215,6 +219,35 @@ OPENAI_IMAGE_REFERENCE_QUALITY="80"
 2. 把 `OPENAI_IMAGE_REFERENCE_LIMIT` 暫時降到 `1`。
 3. 重新上傳已壓縮後的產品圖。
 4. 若仍不穩，Render 方案需升級到 Standard 2GB RAM。
+
+## 產品 LoRA 訓練
+
+產品專案內的 `/projects/[id]/lora-models` 可用 fal.ai FLUX LoRA 訓練產品模型。
+
+使用流程：
+
+1. 先上傳 15-30 張產品圖片，至少 4 張。
+2. 進入「產品模型」頁。
+3. 設定 trigger word，例如 `ubpet_c41_litterbox`。
+4. 選取訓練圖片。
+5. 按「開始 fal LoRA 訓練」。
+6. 訓練送出後，按「同步狀態」查詢 fal 訓練結果。
+
+訓練完成後會保存：
+
+- fal request id
+- trigger word
+- diffusers LoRA URL
+- config file URL
+- debug preprocessed output URL
+
+Render 需要設定：
+
+```env
+FAL_API_KEY="你的 fal key"
+FAL_KEY="你的 fal key"
+FAL_FLUX_LORA_TRAINING_ENDPOINT="fal-ai/flux-lora-fast-training"
+```
 
 ## 上傳檔案
 

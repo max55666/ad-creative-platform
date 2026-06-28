@@ -63,6 +63,7 @@ model Project {
   competitorProfiles Competitor[]
   crowdfundingCaseAnalyses CrowdfundingCaseAnalysis[]
   crowdfundingPagePlans CrowdfundingPagePlan[]
+  productLoraModels ProductLoraModel[]
 
   @@index([userId])
   @@index([brandId])
@@ -324,6 +325,37 @@ model GeneratedImage {
   @@index([projectId])
   @@index([creativeId])
   @@index([videoScriptId])
+}
+
+model ProductLoraModel {
+  id                   String    @id @default(cuid())
+  projectId            String
+  userId               String?
+  name                 String
+  triggerWord          String
+  provider             String    @default("fal")
+  endpoint             String    @default("fal-ai/flux-lora-fast-training")
+  status               String    @default("draft")
+  trainingImageCount   Int       @default(0)
+  assetIds             Json?
+  input                Json?
+  output               Json?
+  requestId            String?
+  dataArchiveUrl       String?
+  diffusersLoraUrl     String?
+  configFileUrl        String?
+  debugPreprocessedUrl String?
+  samplePrompt         String?
+  errorMessage         String?
+  completedAt          DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  project              Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([provider])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model VoiceoverAsset {

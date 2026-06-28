@@ -59,6 +59,12 @@ services:
         sync: false
       - key: ELEVENLABS_VOICE_ID_FEMALE
         sync: false
+      - key: FAL_API_KEY
+        sync: false
+      - key: FAL_KEY
+        sync: false
+      - key: FAL_FLUX_LORA_TRAINING_ENDPOINT
+        value: fal-ai/flux-lora-fast-training
       - key: VIDEO_PROVIDER
         value: kling
       - key: KLING_API_KEY
