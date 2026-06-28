@@ -1,3 +1,4 @@
+import sharp from "sharp";
 import { aiRouter } from "@/lib/ai/router";
 import { getStorage } from "@/lib/storage";
 
@@ -74,18 +75,23 @@ export function targetDimensionsForAspectRatio(aspectRatio?: string) {
 
 export function buildStaticCreativeImagePrompt({
   project,
-  creative
+  creative,
+  productLockedComposite = false
 }: {
   project: any;
   creative: any;
+  productLockedComposite?: boolean;
 }) {
   const referenceBrief = buildReferenceAssetBrief(project.assets);
   return [
     "Create a realistic ecommerce advertising visual concept for an internal creative brief.",
-    "No readable text, no logos, no fake UI, no watermark. Leave clean negative space for text overlays.",
+    "Do not render any readable text, Chinese characters, English letters, numbers, logos, fake UI, watermark, labels, stickers, or typography.",
+    "Leave clean negative space because all copywriting and CTA will be overlaid by the app later.",
     "Use polished commercial photography, natural lighting, and modern Taiwanese ecommerce aesthetics.",
     "The image should clearly communicate the product use case and visual direction.",
-    "The main product must match the uploaded reference image. Do not invent a different hero product, package, color, shape, logo placement, buttons, screen, or material.",
+    productLockedComposite
+      ? "Create the background, scene, props, lighting, and mood only. The exact uploaded product photo will be composited by the app later. Do not draw a replacement hero product."
+      : "The main product must match the uploaded reference image. Do not invent a different hero product, package, color, shape, logo placement, buttons, screen, or material.",
     "If additional reference objects are provided, keep each object visually consistent with its reference and do not replace them with generic alternatives.",
     `Product name: ${project.productName}.`,
     project.productDescription ? `Product description: ${project.productDescription}.` : "",
@@ -93,8 +99,6 @@ export function buildStaticCreativeImagePrompt({
     project.targetMarket ? `Target market: ${project.targetMarket}.` : "",
     referenceBrief ? `Reference asset lock:\n${referenceBrief}` : "",
     `Creative theme: ${creative.title}.`,
-    `Headline intent: ${creative.headline}.`,
-    creative.subHeadline ? `Sub headline intent: ${creative.subHeadline}.` : "",
     `Visual direction: ${creative.visualDirection}.`,
     `Target audience: ${creative.targetAudience}.`
   ]
@@ -153,6 +157,82 @@ export function getReferenceImageUrls(project: any, referenceKeys?: string[]) {
     .map((asset: any) => String(asset.fileUrl))
     .filter((url, index, urls) => url && urls.indexOf(url) === index)
     .slice(0, limit);
+}
+
+export function getPrimaryProductImageUrl(project: any) {
+  const assets = Array.isArray(project?.assets) ? project.assets : [];
+  const imageAssets = assets.filter((asset: any) => asset?.type === "image" && asset?.fileUrl);
+  const mainProduct = imageAssets.find((asset: any) => readMeta(asset).referenceKey === "main_product");
+  const product = imageAssets.find((asset: any) => readMeta(asset).role === "product");
+  return String((mainProduct || product || imageAssets[0])?.fileUrl || "");
+}
+
+export async function composeProductLockedAdImage({
+  backgroundPath,
+  productImageUrl,
+  projectId,
+  aspectRatio
+}: {
+  backgroundPath: string;
+  productImageUrl: string;
+  projectId: string;
+  aspectRatio?: string;
+}) {
+  const dimensions = targetDimensionsForAspectRatio(aspectRatio) || { width: 1080, height: 1080 };
+  const productPath = getStorage().getLocalPath(productImageUrl);
+  const productMaxWidth = Math.round(dimensions.width * 0.68);
+  const productMaxHeight = Math.round(dimensions.height * 0.56);
+  const productBuffer = await sharp(productPath, { animated: false })
+    .rotate()
+    .resize({ width: productMaxWidth, height: productMaxHeight, fit: "inside", withoutEnlargement: true })
+    .png()
+    .toBuffer();
+  const productMeta = await sharp(productBuffer).metadata();
+  const productWidth = productMeta.width || productMaxWidth;
+  const productHeight = productMeta.height || productMaxHeight;
+  const productLeft = Math.max(0, Math.round((dimensions.width - productWidth) / 2));
+  const productTop = Math.max(0, Math.round(dimensions.height * 0.58 - productHeight / 2));
+  const stagePadding = Math.round(dimensions.width * 0.035);
+  const stageLeft = Math.max(0, productLeft - stagePadding);
+  const stageTop = Math.max(0, productTop - stagePadding);
+  const stageWidth = Math.min(dimensions.width - stageLeft, productWidth + stagePadding * 2);
+  const stageHeight = Math.min(dimensions.height - stageTop, productHeight + stagePadding * 2);
+  const stageSvg = Buffer.from(`
+    <svg width="${stageWidth}" height="${stageHeight}" viewBox="0 0 ${stageWidth} ${stageHeight}" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="${stageWidth}" height="${stageHeight}" rx="28" fill="white" fill-opacity="0.72"/>
+    </svg>
+  `);
+  const backgroundBuffer = await sharp(backgroundPath)
+    .resize(dimensions.width, dimensions.height, { fit: "cover", position: "center" })
+    .png()
+    .toBuffer();
+  const output = await sharp(backgroundBuffer)
+    .composite([
+      { input: stageSvg, left: stageLeft, top: stageTop },
+      { input: productBuffer, left: productLeft, top: productTop }
+    ])
+    .png()
+    .toBuffer();
+  const fileName = `${Date.now()}-product-locked-${crypto.randomUUID()}.png`;
+  const stored = await getStorage().put(output, {
+    directory: `processed/${projectId}`,
+    fileName,
+    contentType: "image/png"
+  });
+
+  return {
+    fileUrl: stored.url,
+    filePath: stored.path || getStorage().getLocalPath(stored.key),
+    meta: {
+      productImageUrl,
+      productLeft,
+      productTop,
+      productWidth,
+      productHeight,
+      width: dimensions.width,
+      height: dimensions.height
+    }
+  };
 }
 
 function appendReferenceGuard(prompt: string, assets: unknown, shot: unknown) {

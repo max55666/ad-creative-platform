@@ -3,7 +3,9 @@ import { createCreativeVersion } from "@/lib/creative-versioning";
 import {
   buildStaticCreativeImagePrompt,
   buildStoryboardFramePrompt,
+  composeProductLockedAdImage,
   generateAndSaveImageFile,
+  getPrimaryProductImageUrl,
   getReferenceImageUrls,
   imageSizeForAspectRatio,
   targetDimensionsForAspectRatio
@@ -65,17 +67,24 @@ async function handleStaticCreativeImage({ jobId, projectId, userId, input, prog
   await progress(10);
   await prisma.staticCreativeSuggestion.update({ where: { id: creative.id }, data: { imageStatus: "generating" } });
 
-  const prompt = buildStaticCreativeImagePrompt({ project: creative.project, creative });
+  const primaryProductImageUrl = getPrimaryProductImageUrl(creative.project);
+  const prompt = buildStaticCreativeImagePrompt({
+    project: creative.project,
+    creative,
+    productLockedComposite: Boolean(primaryProductImageUrl)
+  });
   const generated = await generateAndSaveImageFile({
     prompt,
     prefix: "creative",
     size: imageSizeForAspectRatio(aspectRatio),
-    referenceImageUrls: getReferenceImageUrls(creative.project)
+    referenceImageUrls: primaryProductImageUrl ? [primaryProductImageUrl] : getReferenceImageUrls(creative.project)
   });
   await progress(70);
 
   let imageUrl = generated.fileUrl;
+  let imagePath = generated.filePath;
   let processingWarning: string | null = null;
+  let productLockMeta: Record<string, unknown> | null = null;
   const target = targetDimensionsForAspectRatio(aspectRatio);
   if (target) {
     try {
@@ -88,8 +97,28 @@ async function handleStaticCreativeImage({ jobId, projectId, userId, input, prog
         quality: 92
       });
       imageUrl = processed.fileUrl;
+      imagePath = processed.filePath;
     } catch (error) {
       processingWarning = error instanceof Error ? error.message : "Image processing skipped.";
+    }
+  }
+
+  if (primaryProductImageUrl) {
+    try {
+      const locked = await composeProductLockedAdImage({
+        backgroundPath: imagePath,
+        productImageUrl: primaryProductImageUrl,
+        projectId,
+        aspectRatio
+      });
+      imageUrl = locked.fileUrl;
+      imagePath = locked.filePath;
+      productLockMeta = locked.meta;
+    } catch (error) {
+      processingWarning = [
+        processingWarning,
+        error instanceof Error ? `Product lock skipped: ${error.message}` : "Product lock skipped."
+      ].filter(Boolean).join("\n");
     }
   }
 
@@ -106,7 +135,13 @@ async function handleStaticCreativeImage({ jobId, projectId, userId, input, prog
       prompt,
       imageUrl,
       model: generated.model,
-      meta: { sourceUrl: generated.fileUrl, sourceSize: generated.size, processingWarning } as any
+      meta: {
+        sourceUrl: generated.fileUrl,
+        sourceSize: generated.size,
+        processingWarning,
+        productLocked: Boolean(productLockMeta),
+        productLockMeta
+      } as any
     }
   });
   const version = await createCreativeVersion({
