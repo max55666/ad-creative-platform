@@ -1,6 +1,6 @@
-# 廣告素材生成與爆款素材分析平台
+# 廣告素材生成平台
 
-給電商、品牌方、廣告投手與行銷團隊使用的內部工具。平台可管理產品分析專案，產生平面素材、影片腳本、分鏡圖、配音、影片合成、爆款影片拆解、KOL 分析，並支援參考素材鎖定，降低 AI 生成素材時主商品跑掉的機率。
+這是一套給電商、品牌方與廣告投手使用的內部工具，可建立產品專案、分析受眾與賣點、產生平面素材、短影音腳本、分鏡圖、配音、影片合成，以及爆款素材拆解。
 
 ## 技術棧
 
@@ -11,27 +11,27 @@
 - ElevenLabs 配音
 - FFmpeg 影片處理
 - Sharp 圖片處理
-- Playwright 商品頁與案例頁擷取
-- 本機 Storage Layer，預留 S3 / R2
+- Playwright 商品頁擷取
+- Local Storage，正式環境可擴充 S3 / Cloudflare R2
 
 ## 主要頁面
 
 - `/`：Dashboard
 - `/help`：新進行銷人員使用說明
-- `/brands`：品牌中心 / Brand Brain
+- `/brands`：Brand Brain
 - `/competitors`：競品情報
 - `/projects/new`：新增產品分析專案
 - `/projects/[id]`：產品分析報告
-- `/projects/[id]/static-creatives`：平面素材建議與 AI 生成圖
-- `/projects/[id]/video-scripts`：短影音腳本、分鏡、配音、影片合成
+- `/projects/[id]/static-creatives`：平面素材
+- `/projects/[id]/video-scripts`：短影音腳本與分鏡
 - `/projects/[id]/viral-analysis`：爆款影片分析
-- `/projects/[id]/crowdfunding`：嘖嘖募資頁案例拆解與頁面規劃
-- `/kols`：KOL 分析工具
-- `/settings`：模型、供應商與流程設定
+- `/projects/[id]/crowdfunding`：嘖嘖募資頁架構與案例拆解
+- `/kols`：KOL 分析
+- `/settings`：平台設定與模型切換
 
 ## Reference-Locked 參考素材鎖定
 
-素材生成不只依靠文字 prompt。使用者可以針對主商品、人物、動物、道具、場景上傳多張參考圖，並標註用途、角度與備註。
+素材生成不只依靠文字 prompt。使用者可以針對主商品、人物、動物、道具、場景上傳多張參考圖，並標註用途、角度與備註，降低 AI 生成素材時主商品跑掉的機率。
 
 支援用途範例：
 
@@ -54,7 +54,7 @@
 
 ## 嘖嘖募資頁規劃
 
-新增「募資頁」模組，可用於群眾募資頁面企劃。
+「募資頁」模組可用於群眾募資頁面企劃。
 
 功能：
 
@@ -96,76 +96,30 @@ DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ad_creative_intellig
 AUTH_SECRET=""
 ADMIN_EMAIL=""
 ADMIN_PASSWORD=""
+
 OPENAI_API_KEY=""
 OPENAI_MODEL="gpt-5.5"
 OPENAI_VISION_MODEL="gpt-4o-mini"
 OPENAI_IMAGE_MODEL="gpt-image-1"
 OPENAI_IMAGE_MAX_RETRIES="4"
+OPENAI_IMAGE_REFERENCE_LIMIT="3"
+OPENAI_IMAGE_REFERENCE_MAX_WIDTH="1400"
+OPENAI_IMAGE_REFERENCE_QUALITY="80"
 OPENAI_TRANSCRIBE_MODEL="gpt-4o-mini-transcribe"
+
 ELEVENLABS_API_KEY=""
 ELEVENLABS_VOICE_ID_MALE=""
 ELEVENLABS_VOICE_ID_FEMALE=""
+
 FFMPEG_PATH=""
 MAX_UPLOAD_MB="200"
+UPLOAD_IMAGE_MAX_WIDTH="1800"
+UPLOAD_IMAGE_QUALITY="82"
+VISION_IMAGE_MAX_WIDTH="1200"
+VISION_IMAGE_QUALITY="76"
 STORAGE_PROVIDER="local"
 JOB_AUTO_START="true"
-VIDEO_PROVIDER="kling"
-KLING_API_KEY=""
-KLING_API_BASE_URL=""
-KLING_IMAGE_TO_VIDEO_PATH=""
-KLING_TASK_STATUS_PATH=""
-```
 
-## 啟動方式
-
-```bash
-docker compose up -d
-pnpm install
-pnpm prisma migrate dev
-pnpm dev
-```
-
-本機網址：
-
-```text
-http://127.0.0.1:3100
-```
-
-## Render 部署
-
-本專案已包含：
-
-- `Dockerfile`
-- `.dockerignore`
-- `render.yaml`
-
-Render 建議設定：
-
-- Environment：Docker
-- Persistent Disk mount path：`/app/public/uploads`
-- Start command：使用 Dockerfile 預設 CMD
-- `DATABASE_URL`：使用 Render Postgres 的 Internal Database URL
-
-必要環境變數：
-
-```env
-DATABASE_URL=""
-AUTH_SECRET=""
-ADMIN_EMAIL=""
-ADMIN_PASSWORD=""
-OPENAI_API_KEY=""
-OPENAI_MODEL="gpt-5.5"
-OPENAI_VISION_MODEL="gpt-4o-mini"
-OPENAI_IMAGE_MODEL="gpt-image-1"
-OPENAI_IMAGE_MAX_RETRIES="4"
-OPENAI_TRANSCRIBE_MODEL="gpt-4o-mini-transcribe"
-ELEVENLABS_API_KEY=""
-ELEVENLABS_VOICE_ID_MALE=""
-ELEVENLABS_VOICE_ID_FEMALE=""
-FFMPEG_PATH="ffmpeg"
-MAX_UPLOAD_MB="200"
-STORAGE_PROVIDER="local"
-JOB_AUTO_START="true"
 VIDEO_PROVIDER="kling"
 KLING_API_KEY=""
 KLING_API_BASE_URL="https://api.klingai.com"
@@ -178,35 +132,100 @@ KLING_TIMEOUT_MS="600000"
 KLING_POLL_INTERVAL_MS="8000"
 ```
 
-Docker 啟動時會自動執行：
+## 本機啟動
 
 ```bash
-pnpm prisma migrate deploy
-pnpm start
+docker compose up -d
+pnpm install
+pnpm prisma migrate dev
+pnpm dev
 ```
 
-### 登入保護
+開啟：
 
-正式部署前請在 Render 的 Environment Variables 設定：
+```text
+http://127.0.0.1:3100
+```
+
+## Render 部署
+
+Render Web Service 建議設定：
+
+- Environment：Docker
+- Region：Singapore，與資料庫同區
+- Persistent Disk mount path：`/app/public/uploads`
+- Persistent Disk size：建議從 10GB 開始
+- Start command：使用 Dockerfile 內的 CMD
+- `DATABASE_URL`：使用 Render Postgres 的 Internal Database URL
+
+Render Environment Variables 至少需要：
 
 ```env
-AUTH_SECRET="一段至少 32 字元的隨機字串"
-ADMIN_EMAIL="你的登入 email"
-ADMIN_PASSWORD="你的登入密碼"
+DATABASE_URL=""
+AUTH_SECRET=""
+ADMIN_EMAIL=""
+ADMIN_PASSWORD=""
+OPENAI_API_KEY=""
+ELEVENLABS_API_KEY=""
+ELEVENLABS_VOICE_ID_MALE=""
+ELEVENLABS_VOICE_ID_FEMALE=""
+FFMPEG_PATH="ffmpeg"
+STORAGE_PROVIDER="local"
+JOB_AUTO_START="true"
 ```
 
-`AUTH_SECRET` 用來簽發登入 cookie；`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 是登入工作台的管理員帳密。
+## 登入保護
 
-### 上傳檔案保存
+正式環境請設定：
+
+```env
+AUTH_SECRET="至少 32 字元以上的隨機字串"
+ADMIN_EMAIL="管理員 email"
+ADMIN_PASSWORD="管理員密碼"
+```
+
+`AUTH_SECRET` 用於簽發登入 cookie，`ADMIN_EMAIL` 與 `ADMIN_PASSWORD` 是目前的簡易管理員帳密。
+
+## 圖片與素材生成穩定性
+
+Render Starter 只有 512MB RAM，若一次上傳多張高解析產品圖並立即產生素材，可能造成服務記憶體不足，瀏覽器會看到 `502 Bad Gateway`。
+
+目前系統已加入保護：
+
+- 上傳圖片會自動壓縮成較小的 JPG
+- Vision 分析會使用縮小圖
+- OpenAI Images 參考圖預設最多取 3 張
+- 送入 OpenAI Images 前會再壓縮參考圖
+
+可調整的環境變數：
+
+```env
+UPLOAD_IMAGE_MAX_WIDTH="1800"
+UPLOAD_IMAGE_QUALITY="82"
+VISION_IMAGE_MAX_WIDTH="1200"
+VISION_IMAGE_QUALITY="76"
+OPENAI_IMAGE_REFERENCE_LIMIT="3"
+OPENAI_IMAGE_REFERENCE_MAX_WIDTH="1400"
+OPENAI_IMAGE_REFERENCE_QUALITY="80"
+```
+
+如果仍然出現 `502 Bad Gateway`：
+
+1. 先到 Render Logs 檢查是否有 `out of memory`、`Killed`、`JavaScript heap out of memory`。
+2. 把 `OPENAI_IMAGE_REFERENCE_LIMIT` 暫時降到 `1`。
+3. 重新上傳已壓縮後的產品圖。
+4. 若仍不穩，Render 方案需升級到 Standard 2GB RAM。
+
+## 上傳檔案
 
 Render Web Service 必須新增 Persistent Disk：
 
 ```text
 Mount path: /app/public/uploads
-Size: 10 GB 或以上
+Size: 10 GB
 ```
 
-否則圖片、影片、配音檔只會存在暫時容器裡，一旦重新部署就會破圖或找不到檔案。新上傳檔案會透過 `/api/files/...` 受登入保護的路由讀取。
+所有新上傳檔案會透過 `/api/files/...` 讀取，不會直接暴露 public uploads 路徑。若舊檔案是在沒有 Persistent Disk 前上傳，Render 重新部署後可能已不存在，需要重新上傳。
 
 ## 測試
 

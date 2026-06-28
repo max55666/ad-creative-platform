@@ -1,5 +1,5 @@
 import { readFile } from "fs/promises";
-import path from "path";
+import sharp from "sharp";
 import type { ProductAsset } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { getOpenAIClient } from "@/lib/ai/providers/openai";
@@ -94,8 +94,8 @@ async function describeReferenceImage({
 
   try {
     const filePath = getStorage().getLocalPath(fileUrl);
-    const buffer = await readFile(filePath);
-    const mimeType = mimeTypeFromPath(filePath);
+    const buffer = await readVisionImage(filePath);
+    const mimeType = "image/jpeg";
     const imageUrl = `data:${mimeType};base64,${buffer.toString("base64")}`;
     const completion = await openai.chat.completions.create({
       model: process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || "gpt-4o-mini",
@@ -139,10 +139,22 @@ async function describeReferenceImage({
   }
 }
 
-function mimeTypeFromPath(filePath: string) {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
-  if (ext === ".webp") return "image/webp";
-  if (ext === ".gif") return "image/gif";
-  return "image/png";
+async function readVisionImage(filePath: string) {
+  const buffer = await readFile(filePath);
+  try {
+    const maxWidth = positiveInt(process.env.VISION_IMAGE_MAX_WIDTH, 1200);
+    const quality = positiveInt(process.env.VISION_IMAGE_QUALITY, 76);
+    return await sharp(buffer, { animated: false })
+      .rotate()
+      .resize({ width: maxWidth, height: maxWidth, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality, mozjpeg: true })
+      .toBuffer();
+  } catch {
+    return buffer;
+  }
+}
+
+function positiveInt(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }

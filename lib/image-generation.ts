@@ -140,6 +140,7 @@ export function buildStoryboardFramePrompt({
 }
 
 export function getReferenceImageUrls(project: any, referenceKeys?: string[]) {
+  const limit = positiveInt(process.env.OPENAI_IMAGE_REFERENCE_LIMIT, 3);
   const assets = Array.isArray(project?.assets) ? project.assets : [];
   const wanted = new Set((referenceKeys || []).map((key) => String(key).trim()).filter(Boolean));
   const imageAssets = assets.filter((asset: any) => asset?.type === "image" && asset?.fileUrl);
@@ -151,7 +152,7 @@ export function getReferenceImageUrls(project: any, referenceKeys?: string[]) {
   return [...productAssets, ...objectAssets, ...imageAssets]
     .map((asset: any) => String(asset.fileUrl))
     .filter((url, index, urls) => url && urls.indexOf(url) === index)
-    .slice(0, 8);
+    .slice(0, limit);
 }
 
 function appendReferenceGuard(prompt: string, assets: unknown, shot: unknown) {
@@ -214,4 +215,9 @@ function extractShotReferenceKeys(shot: unknown) {
 
 function readMeta(asset: any) {
   return asset?.meta && typeof asset.meta === "object" && !Array.isArray(asset.meta) ? asset.meta as Record<string, string> : {};
+}
+
+function positiveInt(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }

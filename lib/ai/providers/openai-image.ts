@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import path from "path";
+import sharp from "sharp";
 import { toFile } from "openai";
 import { getOpenAIClient } from "@/lib/ai/providers/openai";
 import { ImageGenerationRequest, ImageGenerationResponse } from "@/lib/ai/types";
@@ -16,8 +17,12 @@ export async function generateOpenAIImage({
   const settings = await getSystemSettings();
 
   const model = settings.providers.image.model || process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
-  const validReferencePaths = referenceImagePaths.filter((filePath) => filePath && existsSync(filePath)).slice(0, 8);
+  const referenceLimit = positiveInt(process.env.OPENAI_IMAGE_REFERENCE_LIMIT, 3);
+  const validReferencePaths = referenceImagePaths
+    .filter((filePath) => filePath && existsSync(filePath) && supportedImageMimeType(filePath))
+    .slice(0, referenceLimit);
   const referenceFiles = await createReferenceImageFiles(validReferencePaths);
+
   const response = await withOpenAIImageRateLimitRetry(() => {
     if (referenceFiles.length) {
       return openai.images.edit({
@@ -51,12 +56,26 @@ export async function generateOpenAIImage({
 async function createReferenceImageFiles(filePaths: string[]) {
   const files = [];
   for (const filePath of filePaths) {
-    const mimeType = supportedImageMimeType(filePath);
-    if (!mimeType) continue;
-    const buffer = await readFile(filePath);
-    files.push(await toFile(buffer, normalizedImageName(filePath, mimeType), { type: mimeType }));
+    try {
+      const buffer = await readAndOptimizeReference(filePath);
+      files.push(await toFile(buffer, normalizedImageName(filePath), { type: "image/jpeg" }));
+    } catch {
+      // Skip a bad reference instead of failing the whole generation job.
+    }
   }
   return files;
+}
+
+async function readAndOptimizeReference(filePath: string) {
+  const buffer = await readFile(filePath);
+  const maxWidth = positiveInt(process.env.OPENAI_IMAGE_REFERENCE_MAX_WIDTH, 1400);
+  const quality = positiveInt(process.env.OPENAI_IMAGE_REFERENCE_QUALITY, 80);
+
+  return sharp(buffer, { animated: false })
+    .rotate()
+    .resize({ width: maxWidth, height: maxWidth, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality, mozjpeg: true })
+    .toBuffer();
 }
 
 function supportedImageMimeType(filePath: string) {
@@ -67,14 +86,13 @@ function supportedImageMimeType(filePath: string) {
   return "";
 }
 
-function normalizedImageName(filePath: string, mimeType: string) {
+function normalizedImageName(filePath: string) {
   const baseName = path.basename(filePath, path.extname(filePath)).replace(/[^a-zA-Z0-9-_]+/g, "-") || "reference";
-  const extension = mimeType === "image/jpeg" ? ".jpg" : mimeType === "image/webp" ? ".webp" : ".png";
-  return `${baseName}${extension}`;
+  return `${baseName}.jpg`;
 }
 
 async function withOpenAIImageRateLimitRetry<T>(operation: () => Promise<T>) {
-  const maxAttempts = Number(process.env.OPENAI_IMAGE_MAX_RETRIES || 4);
+  const maxAttempts = positiveInt(process.env.OPENAI_IMAGE_MAX_RETRIES, 4);
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -119,8 +137,8 @@ function toFriendlyImageError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || "");
   return new Error(
     [
-      "OpenAI 圖片生成額度暫時用完，請稍後重試。",
-      "目前 gpt-image-1 有每分鐘圖片數限制；分鏡圖一次會產生多張，短時間連續生成時容易遇到 429。",
+      "OpenAI 圖片生成目前達到速率限制。",
+      "系統已自動等待並重試，但仍未成功。請稍後再按重試，或降低一次產生的素材數量。",
       message
     ].join("\n")
   );
@@ -128,4 +146,9 @@ function toFriendlyImageError(error: unknown) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function positiveInt(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
