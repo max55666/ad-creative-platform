@@ -1,0 +1,669 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AssetType {
+  image
+  video
+  url
+  text
+}
+
+model User {
+  id        String    @id @default(cuid())
+  name      String
+  email     String    @unique
+  projects  Project[]
+  brands    Brand[]
+  competitors Competitor[]
+  kolProfiles KolProfile[]
+  kolAnalyses KolAnalysis[]
+  kolScripts  KolScript[]
+  providerUsageLogs ProviderUsageLog[]
+  createdAt DateTime  @default(now())
+}
+
+model Project {
+  id                 String                     @id @default(cuid())
+  userId             String
+  brandId            String?
+  productName        String
+  productDescription String?
+  productUrl         String?
+  targetMarket       String?
+  price              String?
+  specs              String?
+  mainUseCase        String?
+  competitors        String?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  user               User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brand              Brand?                     @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  assets             ProductAsset[]
+  analyses           ProductAnalysis[]
+  staticCreatives    StaticCreativeSuggestion[]
+  videoScripts       VideoScript[]
+  viralAnalyses      ViralVideoAnalysis[]
+  generatedImages    GeneratedImage[]
+  voiceovers         VoiceoverAsset[]
+  processedMedia     ProcessedMedia[]
+  videoRenders       VideoRender[]
+  generationJobs     GenerationJob[]
+  creatives          Creative[]
+  providerUsageLogs  ProviderUsageLog[]
+  viralVideos        ViralVideo[]
+  kolProfiles        KolProfile[]
+  kolAnalyses        KolAnalysis[]
+  kolScripts         KolScript[]
+  competitorProfiles Competitor[]
+  crowdfundingCaseAnalyses CrowdfundingCaseAnalysis[]
+  crowdfundingPagePlans CrowdfundingPagePlan[]
+
+  @@index([userId])
+  @@index([brandId])
+  @@index([createdAt])
+}
+
+model Brand {
+  id           String       @id @default(cuid())
+  userId       String
+  name         String
+  websiteUrl   String?
+  industry     String?
+  targetMarket String?
+  description  String?
+  voiceTone    String?
+  visualStyle  String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projects     Project[]
+  brains       BrandBrain[]
+  competitors  Competitor[]
+
+  @@index([userId])
+  @@index([industry])
+  @@index([createdAt])
+}
+
+model Competitor {
+  id            String               @id @default(cuid())
+  userId        String
+  brandId       String?
+  projectId     String?
+  name          String
+  websiteUrl    String?
+  productUrl    String?
+  industry      String?
+  targetMarket  String?
+  description   String?
+  priceRange    String?
+  tags          Json?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+  user          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brand         Brand?               @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  project       Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  analyses      CompetitorAnalysis[]
+
+  @@index([userId])
+  @@index([brandId])
+  @@index([projectId])
+  @@index([industry])
+  @@index([createdAt])
+}
+
+model CompetitorAnalysis {
+  id              String     @id @default(cuid())
+  competitorId    String
+  summary         Json
+  positioning     Json
+  productOffer    Json
+  audience        Json
+  messaging       Json
+  landingPage     Json
+  creativeAngles  Json
+  opportunities   Json
+  risks           Json
+  rawOutput       Json?
+  createdAt       DateTime   @default(now())
+  competitor      Competitor @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+
+  @@index([competitorId])
+  @@index([createdAt])
+}
+
+model BrandBrain {
+  id             String   @id @default(cuid())
+  brandId        String
+  summary        Json
+  positioning    Json
+  voice          Json
+  visualIdentity Json
+  audience       Json
+  messaging      Json
+  guardrails     Json
+  rawOutput      Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  brand          Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@index([brandId])
+  @@index([createdAt])
+}
+
+model ProductAsset {
+  id        String    @id @default(cuid())
+  projectId String
+  type      AssetType
+  fileUrl   String?
+  content   String?
+  meta      Json?
+  createdAt DateTime  @default(now())
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([type])
+}
+
+model ProductAnalysis {
+  id               String   @id @default(cuid())
+  projectId        String
+  summary          Json
+  audienceAnalysis Json
+  painPoints       Json
+  sellingPoints    Json
+  adAngles         Json
+  nextSteps        Json?
+  rawOutput        Json?
+  createdAt        DateTime @default(now())
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([createdAt])
+}
+
+model CrowdfundingCaseAnalysis {
+  id                 String   @id @default(cuid())
+  projectId          String
+  sourceUrl          String?
+  title              String?
+  platform           String   @default("zeczec")
+  scrapedPage        Json?
+  structure          Json
+  visualStrategy     Json
+  copywriting        Json
+  conversionInsights Json
+  reusableTemplate   Json
+  rawOutput          Json?
+  createdAt          DateTime @default(now())
+  project            Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pagePlans          CrowdfundingPagePlan[]
+
+  @@index([projectId])
+  @@index([platform])
+  @@index([createdAt])
+}
+
+model CrowdfundingPagePlan {
+  id             String   @id @default(cuid())
+  projectId      String
+  caseAnalysisId String?
+  mode           String   @default("from_product")
+  targetPlatform String   @default("zeczec")
+  title          String
+  hero           Json
+  pageSections   Json
+  imageBriefs    Json
+  copywriting    Json
+  rewardStrategy Json?
+  faq            Json?
+  conversionScore Json?
+  rawOutput      Json?
+  createdAt      DateTime @default(now())
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  caseAnalysis   CrowdfundingCaseAnalysis? @relation(fields: [caseAnalysisId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([caseAnalysisId])
+  @@index([targetPlatform])
+  @@index([createdAt])
+}
+
+model StaticCreativeSuggestion {
+  id              String   @id @default(cuid())
+  projectId       String
+  title           String
+  headline        String
+  subHeadline     String?
+  visualDirection String
+  copywriting     Json
+  cta             String
+  platform        String
+  targetAudience  String
+  communication   String?
+  previewImageUrl String?
+  imagePrompt     String?
+  imageStatus     String?
+  source          String   @default("ai")
+  createdAt       DateTime @default(now())
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([createdAt])
+}
+
+model VideoScript {
+  id            String   @id @default(cuid())
+  projectId     String
+  title         String
+  platform      String
+  duration      String
+  style         String?
+  hook          String
+  storyboard    Json
+  voiceover     Json
+  captions      Json
+  bgmSuggestion String
+  tone          String?
+  props         Json?
+  requiredObjects Json?
+  storyboardImages Json?
+  imageStatus    String?
+  cta           String
+  targetAudience String?
+  source        String   @default("ai")
+  createdAt     DateTime @default(now())
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([createdAt])
+}
+
+model ViralVideoAnalysis {
+  id                String   @id @default(cuid())
+  projectId         String
+  videoUrl          String
+  transcript        Json?
+  segmentBreakdown  Json
+  structureAnalysis Json
+  captionAnalysis   Json
+  voiceAnalysis     Json
+  musicAnalysis     Json
+  emotionAnalysis   Json
+  viralReason       Json
+  reusableTemplate  Json
+  rewrittenScripts  Json?
+  createdAt         DateTime @default(now())
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([createdAt])
+}
+
+model GeneratedImage {
+  id          String   @id @default(cuid())
+  projectId   String
+  creativeId  String?
+  videoScriptId String?
+  type        String
+  aspectRatio String?
+  prompt      String
+  imageUrl    String
+  provider    String   @default("openai")
+  model       String?
+  meta        Json?
+  createdAt   DateTime @default(now())
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([creativeId])
+  @@index([videoScriptId])
+}
+
+model VoiceoverAsset {
+  id            String   @id @default(cuid())
+  projectId     String
+  videoScriptId String?
+  language      String
+  gender        String
+  voiceId       String?
+  provider      String   @default("elevenlabs")
+  text          String
+  audioUrl      String
+  durationSec   Float?
+  meta          Json?
+  createdAt     DateTime @default(now())
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([videoScriptId])
+}
+
+model ProcessedMedia {
+  id        String   @id @default(cuid())
+  projectId String
+  sourceUrl String?
+  type      String
+  fileUrl   String
+  meta      Json?
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([type])
+}
+
+model VideoRender {
+  id            String   @id @default(cuid())
+  projectId     String
+  videoScriptId String?
+  provider      String   @default("ffmpeg")
+  status        String   @default("pending")
+  videoUrl      String?
+  input         Json?
+  meta          Json?
+  createdAt     DateTime @default(now())
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([videoScriptId])
+}
+
+model GenerationJob {
+  id             String    @id @default(cuid())
+  projectId      String?
+  userId         String?
+  type           String
+  status         String    @default("queued")
+  progress       Int       @default(0)
+  inputPayload   Json
+  outputPayload  Json?
+  errorMessage   String?
+  attempts       Int       @default(0)
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  project        Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@map("generation_jobs")
+  @@index([projectId])
+  @@index([status])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model Creative {
+  id          String            @id @default(cuid())
+  projectId   String
+  userId      String?
+  type        String
+  title       String
+  description String?
+  sourceRefId String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  project     Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions    CreativeVersion[]
+  assets      CreativeAsset[]
+
+  @@index([projectId])
+  @@index([type])
+  @@index([sourceRefId])
+}
+
+model CreativeVersion {
+  id               String          @id @default(cuid())
+  creativeId       String
+  version          Int
+  kind             String
+  prompt           String?
+  model            String?
+  provider         String?
+  generationParams Json?
+  content          Json?
+  createdAt        DateTime        @default(now())
+  creative         Creative        @relation(fields: [creativeId], references: [id], onDelete: Cascade)
+  assets           CreativeAsset[]
+
+  @@unique([creativeId, version])
+  @@index([creativeId])
+  @@index([kind])
+}
+
+model CreativeAsset {
+  id          String           @id @default(cuid())
+  creativeId  String
+  versionId   String?
+  type        String
+  url         String
+  storageKey  String?
+  mimeType    String?
+  meta        Json?
+  createdAt   DateTime         @default(now())
+  creative    Creative         @relation(fields: [creativeId], references: [id], onDelete: Cascade)
+  version     CreativeVersion? @relation(fields: [versionId], references: [id], onDelete: SetNull)
+
+  @@index([creativeId])
+  @@index([versionId])
+  @@index([type])
+}
+
+model ProviderUsageLog {
+  id               String   @id @default(cuid())
+  provider         String
+  model            String?
+  projectId        String?
+  userId           String?
+  jobId            String?
+  inputTokens      Int?
+  outputTokens     Int?
+  imageCount       Int?
+  audioSeconds     Float?
+  videoSeconds     Float?
+  estimatedCostUsd Float?
+  status           String
+  errorMessage     String?
+  createdAt        DateTime @default(now())
+  project          Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  user             User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([provider])
+  @@index([projectId])
+  @@index([userId])
+  @@index([jobId])
+  @@index([createdAt])
+}
+
+model ViralVideo {
+  id             String          @id @default(cuid())
+  projectId      String
+  sourceUrl      String
+  durationSec    Float?
+  transcript     Json?
+  hookType       String?
+  firstThreeSec  String?
+  paceSummary    String?
+  captionStrategy String?
+  productExposure Json?
+  painPointArc   Json?
+  cta            Json?
+  analysisId     String?
+  createdAt      DateTime        @default(now())
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  frames         ViralFrame[]
+  segments       ViralSegment[]
+  patterns       ViralPattern[]
+  templates      ViralTemplate[]
+
+  @@index([projectId])
+  @@index([analysisId])
+  @@index([createdAt])
+}
+
+model ViralFrame {
+  id          String     @id @default(cuid())
+  viralVideoId String
+  frameUrl    String
+  timestampSec Float?
+  captionText String?
+  visualNotes String?
+  productVisible Boolean @default(false)
+  meta        Json?
+  createdAt   DateTime   @default(now())
+  viralVideo   ViralVideo @relation(fields: [viralVideoId], references: [id], onDelete: Cascade)
+
+  @@index([viralVideoId])
+  @@index([timestampSec])
+}
+
+model ViralSegment {
+  id             String     @id @default(cuid())
+  viralVideoId   String
+  startSec       Float?
+  endSec         Float?
+  role           String?
+  hookType       String?
+  visual         String?
+  caption        String?
+  voiceover      String?
+  pace           String?
+  emotion        String?
+  productExposure String?
+  createdAt      DateTime   @default(now())
+  viralVideo     ViralVideo @relation(fields: [viralVideoId], references: [id], onDelete: Cascade)
+
+  @@index([viralVideoId])
+  @@index([startSec])
+}
+
+model ViralPattern {
+  id           String     @id @default(cuid())
+  viralVideoId String
+  type         String
+  name         String
+  description  String?
+  evidence     Json?
+  createdAt    DateTime   @default(now())
+  viralVideo   ViralVideo @relation(fields: [viralVideoId], references: [id], onDelete: Cascade)
+
+  @@index([viralVideoId])
+  @@index([type])
+}
+
+model ViralTemplate {
+  id              String     @id @default(cuid())
+  viralVideoId    String
+  name            String
+  template        Json
+  rewrittenScripts Json?
+  bestFitProducts Json?
+  createdAt       DateTime   @default(now())
+  viralVideo      ViralVideo @relation(fields: [viralVideoId], references: [id], onDelete: Cascade)
+
+  @@index([viralVideoId])
+}
+
+model KolProfile {
+  id            String        @id @default(cuid())
+  userId        String
+  projectId     String?
+  name          String
+  platform      String
+  profileUrl    String
+  description   String?
+  followerCount String?
+  avgViews      String?
+  avgEngagement String?
+  tags          Json?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project       Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  videos        KolVideo[]
+  analyses      KolAnalysis[]
+  scripts       KolScript[]
+
+  @@index([userId])
+  @@index([projectId])
+  @@index([platform])
+  @@index([createdAt])
+}
+
+model KolVideo {
+  id               String     @id @default(cuid())
+  kolProfileId     String
+  videoUrl         String?
+  fileUrl          String?
+  title            String?
+  sponsoredBrand   String?
+  sponsoredProduct String?
+  transcript       Json?
+  notes            String?
+  meta             Json?
+  createdAt        DateTime   @default(now())
+  kolProfile       KolProfile @relation(fields: [kolProfileId], references: [id], onDelete: Cascade)
+
+  @@index([kolProfileId])
+  @@index([createdAt])
+}
+
+model KolAnalysis {
+  id                    String     @id @default(cuid())
+  kolProfileId          String
+  userId                String?
+  projectId             String?
+  persona               Json
+  contentStyle          Json
+  audienceProfile       Json
+  brandFit              Json
+  productFit            Json
+  sponsoredVideoInsights Json
+  suitableProducts      Json
+  riskAssessment        Json
+  recommendations       Json
+  rawOutput             Json?
+  createdAt             DateTime   @default(now())
+  kolProfile            KolProfile @relation(fields: [kolProfileId], references: [id], onDelete: Cascade)
+  user                  User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  project               Project?   @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([kolProfileId])
+  @@index([userId])
+  @@index([projectId])
+  @@index([createdAt])
+}
+
+model KolScript {
+  id             String     @id @default(cuid())
+  kolProfileId   String
+  userId         String?
+  projectId      String?
+  title          String
+  platform       String
+  objective      String
+  duration       String
+  hook           String
+  storyline      Json
+  captions       Json
+  voiceover      Json
+  shotList       Json
+  cta            String
+  adUsageNotes   Json?
+  rawOutput      Json?
+  createdAt      DateTime   @default(now())
+  kolProfile     KolProfile @relation(fields: [kolProfileId], references: [id], onDelete: Cascade)
+  user           User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  project        Project?   @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([kolProfileId])
+  @@index([userId])
+  @@index([projectId])
+  @@index([createdAt])
+}
