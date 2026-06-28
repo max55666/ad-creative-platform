@@ -93,6 +93,9 @@
 
 ```env
 DATABASE_URL="postgresql://postgres:postgres@localhost:5432/ad_creative_intelligence?schema=public"
+AUTH_SECRET=""
+ADMIN_EMAIL=""
+ADMIN_PASSWORD=""
 OPENAI_API_KEY=""
 OPENAI_MODEL="gpt-5.5"
 OPENAI_VISION_MODEL="gpt-4o-mini"
@@ -147,6 +150,9 @@ Render 建議設定：
 
 ```env
 DATABASE_URL=""
+AUTH_SECRET=""
+ADMIN_EMAIL=""
+ADMIN_PASSWORD=""
 OPENAI_API_KEY=""
 OPENAI_MODEL="gpt-5.5"
 OPENAI_VISION_MODEL="gpt-4o-mini"
@@ -178,6 +184,18 @@ Docker 啟動時會自動執行：
 pnpm prisma migrate deploy
 pnpm start
 ```
+
+### 登入保護
+
+正式部署前請在 Render 的 Environment Variables 設定：
+
+```env
+AUTH_SECRET="一段至少 32 字元的隨機字串"
+ADMIN_EMAIL="你的登入 email"
+ADMIN_PASSWORD="你的登入密碼"
+```
+
+`AUTH_SECRET` 用來簽發登入 cookie；`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 是登入工作台的管理員帳密。
 
 ## 測試
 

@@ -1,10 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Boxes, Building2, CircleHelp, LayoutDashboard, Search, Settings, Sparkles, UserRound } from "lucide-react";
+import { LogoutButton } from "@/components/logout-button";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "廣告素材智能工作台",
+  title: "AMOS 廣告素材智能工作台",
   description: "Internal AI workspace for ecommerce ad creative strategy."
 };
 
@@ -33,7 +34,7 @@ export default function RootLayout({
                 <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
                   <Sparkles className="h-4 w-4" />
                 </span>
-                <span>廣告素材智能工作台</span>
+                <span>AMOS 智能工作台</span>
               </Link>
 
               <nav className="grid gap-1 p-3">
@@ -49,8 +50,9 @@ export default function RootLayout({
                 ))}
               </nav>
 
-              <div className="mt-auto border-t p-4 text-xs leading-5 text-muted-foreground">
-                內部行銷工具。先建立品牌與產品，再生成素材、腳本、KOL 與競品情報。
+              <div className="mt-auto grid gap-3 border-t p-4 text-xs leading-5 text-muted-foreground">
+                <p>內部團隊專用，所有生成結果會保存，方便回看、複製與優化。</p>
+                <LogoutButton />
               </div>
             </div>
           </aside>
@@ -62,8 +64,11 @@ export default function RootLayout({
                   <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
                     <Sparkles className="h-4 w-4" />
                   </span>
-                  廣告素材智能工作台
+                  AMOS 智能工作台
                 </Link>
+                <div className="w-24">
+                  <LogoutButton />
+                </div>
               </div>
               <nav className="flex gap-1 overflow-x-auto border-t px-3 py-2">
                 {navItems.map((item) => (
