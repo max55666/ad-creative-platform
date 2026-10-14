@@ -21,6 +21,7 @@ from pathlib import Path
 
 
 _USER_ID = re.compile(r"U[0-9a-f]{32}\Z")
+_GROUP_ID = re.compile(r"C[0-9a-f]{32}\Z")
 _LINE_ISSUER = "https://access.line.me"
 _TIMEOUT = 15
 _MAX_JSON_BYTES = 1024 * 1024
@@ -205,6 +206,111 @@ def _safe_request_id(headers, name):
     if isinstance(value, str) and 1 <= len(value) <= 128 and value.isascii() and value.isprintable():
         return value
     return None
+
+
+def _valid_group_token(token):
+    return (isinstance(token, str) and 1 <= len(token) <= 8192
+            and token.isascii() and token.isprintable()
+            and not any(character.isspace() for character in token))
+
+
+def get_group_summary(token, group_id):
+    """Read the joined group's identity without sending any message.
+
+    Return only {groupId, groupName}; never return member data or upstream error
+    bodies. A missing/inaccessible group raises a sanitized ValueError.
+    """
+    try:
+        if not _valid_group_token(token):
+            raise ValueError("invalid token")
+        if not isinstance(group_id, str) or not _GROUP_ID.fullmatch(group_id):
+            raise ValueError("invalid group")
+        request = urllib.request.Request(
+            "https://api.line.me/v2/bot/group/" + group_id + "/summary",
+            headers={"Authorization": "Bearer " + token}, method="GET",
+        )
+        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
+            if response.getcode() != 200:
+                raise ValueError("unexpected status")
+            summary = _read_json(response)
+        name = summary.get("groupName")
+        if (summary.get("groupId") != group_id or not isinstance(name, str)
+                or not name.strip() or len(name) > 300
+                or any(ord(character) < 32 or ord(character) == 127 for character in name)):
+            raise ValueError("invalid group summary")
+        name.encode("utf-8")
+        return {"groupId": group_id, "groupName": name}
+    except (urllib.error.URLError, http.client.HTTPException, OSError,
+            UnicodeError, ValueError, TypeError, KeyError):
+        raise ValueError("LINE group summary is unavailable") from None
+
+
+def _group_push_result(state, retry_key, status=None, request_id=None,
+                       error=None, retryable=False, ambiguous=False):
+    result = _result(state, retry_key, status, request_id, error)
+    result.update(retryable=retryable, ambiguous=ambiguous)
+    return result
+
+
+def send_group_text(token, group_id, text, retry_key):
+    """Explicitly push one text to an authorized, previously selected group.
+
+    Return the usual push result plus retryable/ambiguous booleans. Acceptance
+    means API acceptance, never member delivery/read confirmation. Only 200 or
+    409 with x-line-accepted-request-id is accepted. Network errors and 5xx may
+    have delivered, so the caller must preserve the identical recipient, text,
+    and retry key and retry within 24 hours of the first attempt. This helper
+    never retries, creates a key, discovers/selects a group, or logs inputs.
+    """
+    try:
+        normalized_key = str(uuid.UUID(str(retry_key)))
+    except (ValueError, TypeError, AttributeError):
+        return _group_push_result("failed", None, error="invalid_retry_key")
+    if not _valid_group_token(token):
+        return _group_push_result("failed", normalized_key, error="invalid_token")
+    if not isinstance(group_id, str) or not _GROUP_ID.fullmatch(group_id):
+        return _group_push_result("failed", normalized_key, error="invalid_recipient")
+    try:
+        valid_text = (isinstance(text, str) and bool(text.strip())
+                      and 1 <= len(text.encode("utf-16-le")) // 2 <= 5000
+                      and not any(ord(character) < 32 and character not in "\r\n\t"
+                                  for character in text))
+    except UnicodeError:
+        valid_text = False
+    if not valid_text:
+        return _group_push_result("failed", normalized_key, error="invalid_payload")
+    try:
+        request = urllib.request.Request(
+            "https://api.line.me/v2/bot/message/push",
+            data=json.dumps({"to": group_id, "messages": [{"type": "text", "text": text}]},
+                            ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + token,
+                     "X-Line-Retry-Key": normalized_key}, method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
+            status = response.getcode()
+            request_id = _safe_request_id(response.headers, "x-line-request-id")
+            accepted_id = _safe_request_id(response.headers, "x-line-accepted-request-id")
+        if status == 200:
+            return _group_push_result("accepted", normalized_key, status, request_id)
+        if status == 409 and accepted_id:
+            return _group_push_result("accepted", normalized_key, status, accepted_id)
+        return _group_push_result("failed", normalized_key, status, request_id,
+                                  "unexpected_status", retryable=status == 429 or 500 <= status < 600,
+                                  ambiguous=status == 409 or 500 <= status < 600 or not 400 <= status < 500)
+    except urllib.error.HTTPError as error:
+        status = error.code
+        accepted_id = _safe_request_id(error.headers, "x-line-accepted-request-id")
+        error.close()
+        if status == 409 and accepted_id:
+            return _group_push_result("accepted", normalized_key, status, accepted_id)
+        return _group_push_result("failed", normalized_key, status, error="http_error",
+                                  retryable=status == 429 or 500 <= status < 600,
+                                  ambiguous=status == 409 or 500 <= status < 600)
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError,
+            UnicodeError, TypeError):
+        return _group_push_result("failed", normalized_key, error="network_error",
+                                  retryable=True, ambiguous=True)
 
 
 def submission_confirmation(case_id, case_data):
