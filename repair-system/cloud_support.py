@@ -58,6 +58,16 @@ def validate_secret(value):
     return value
 
 
+def format_sheet_phone(value):
+    """Display Taiwanese mobile numbers without changing the source data."""
+    if not isinstance(value, str):
+        return value
+    digits = re.sub(r'[\s-]', '', value)
+    if re.fullmatch(r'09[0-9]{8}', digits):
+        return digits[:4] + '-' + digits[4:]
+    return value
+
+
 def build_payload(case, revision=1, updated_at=None):
     """Build a strict cloud record from a server-owned case, never browser input.
 
@@ -76,7 +86,7 @@ def build_payload(case, revision=1, updated_at=None):
         'lineUserId': case.get('user_id', ''),
         'lineDisplayName': data.get('lineDisplayName', ''),
         'email': data.get('email', ''), 'name': data.get('name', ''),
-        'phone': data.get('phone', ''), 'returnAddress': data.get('returnAddress', ''),
+        'phone': format_sheet_phone(data.get('phone', '')), 'returnAddress': data.get('returnAddress', ''),
         'order': data.get('order', ''), 'problem': data.get('problem', ''),
         'extra': data.get('extra', ''), 'status': case.get('status', ''),
         'lineNotification': case.get('notification', ''),
