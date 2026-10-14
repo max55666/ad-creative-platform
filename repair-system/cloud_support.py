@@ -151,6 +151,18 @@ def payload_hash(record):
                                      separators=(',', ':')).encode('utf-8')).hexdigest()
 
 
+def validate_dispatch(dispatch):
+    """A fixed status command from a verified webhook, never arbitrary cells."""
+    if (not isinstance(dispatch, dict) or set(dispatch) != {'caseId', 'commandId'}
+            or not isinstance(dispatch.get('caseId'), str)
+            or not re.fullmatch(r'R[0-9]{8}-[0-9]{4,}', dispatch['caseId'])
+            or len(dispatch['caseId']) > 80
+            or not isinstance(dispatch.get('commandId'), str)
+            or not re.fullmatch(r'[!-~]{1,128}', dispatch['commandId'])):
+        raise ValueError('派車指令格式錯誤')
+    return dispatch
+
+
 class GoogleContentRedirect(urllib.request.HTTPRedirectHandler):
     """Follow Google's ContentService response using GET, never forward its secret."""
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -169,14 +181,17 @@ def _send(endpoint, secret, sheet_id, operation, record=None, opener=None):
         validate_secret(secret)
         if not isinstance(sheet_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,100}', sheet_id):
             raise ValueError('sheet id')
-        if operation not in ('ping', 'upsert', 'pingPickup', 'upsertPickup'):
+        if operation not in ('ping', 'upsert', 'pingPickup', 'upsertPickup', 'pingPickupDispatch', 'updatePickupDispatch'):
             raise ValueError('operation')
-        pickup_operation = operation in ('pingPickup', 'upsertPickup')
+        dispatch_operation = operation in ('pingPickupDispatch', 'updatePickupDispatch')
+        pickup_operation = operation in ('pingPickup', 'upsertPickup') or dispatch_operation
         write_operation = operation in ('upsert', 'upsertPickup')
         if pickup_operation and sheet_id != PRIMARY_SHEET_ID:
             raise ValueError('pickup request scope')
         if write_operation:
             validate_record(record)
+        if operation == 'updatePickupDispatch':
+            validate_dispatch(record)
         if operation == 'upsertPickup' and (
                 record['shipping'] != '由客服派遣物流回收'
                 or not re.fullmatch(r'U[0-9a-f]{32}', record['lineUserId'])):
@@ -186,6 +201,8 @@ def _send(endpoint, secret, sheet_id, operation, record=None, opener=None):
     payload = {'secret': secret, 'sheetId': sheet_id, 'operation': operation}
     if write_operation:
         payload['case'] = record
+    if operation == 'updatePickupDispatch':
+        payload['dispatch'] = record
     body = json.dumps(payload,
                       ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     if len(body) > MAX_BODY:
@@ -199,7 +216,7 @@ def _send(endpoint, secret, sheet_id, operation, record=None, opener=None):
             if response.status != 200 or len(raw) > 8192:
                 raise ValueError('invalid response')
             result = json.loads(raw)
-        expected_schema = 'petpivot-pickup-v1' if pickup_operation else 'petpivot-v1'
+        expected_schema = 'petpivot-dispatch-v1' if dispatch_operation else ('petpivot-pickup-v1' if pickup_operation else 'petpivot-v1')
         valid = (isinstance(result, dict) and result.get('ok') is True
                  and result.get('sheetId') == sheet_id and result.get('schema') == expected_schema)
         if pickup_operation:
@@ -212,6 +229,11 @@ def _send(endpoint, secret, sheet_id, operation, record=None, opener=None):
                      and result.get('action') in ('inserted', 'updated', 'unchanged', 'stale'))
             if pickup_operation:
                 valid = valid and type(result.get('revision')) is int
+        if operation == 'updatePickupDispatch':
+            valid = (valid and result.get('caseId') == record['caseId']
+                     and result.get('commandId') == record['commandId']
+                     and result.get('status') == '已派車'
+                     and result.get('action') in ('updated', 'unchanged'))
         if not valid:
             if isinstance(result, dict) and result.get('error') == 'unauthorized':
                 return {'state': 'failed', 'error': '雲端同步金鑰不符'}
@@ -252,6 +274,16 @@ def pickup_ping(endpoint, secret, sheet_id, opener=None):
 def upsert_pickup(endpoint, secret, sheet_id, record, opener=None):
     """Deliver an eligible, already enrolled new case to the fixed pickup file."""
     return _send(endpoint, secret, sheet_id, 'upsertPickup', record, opener)
+
+
+def pickup_dispatch_ping(endpoint, secret, sheet_id, opener=None):
+    """Read-only capability check for the fixed pickup status column."""
+    return _send(endpoint, secret, sheet_id, 'pingPickupDispatch', opener=opener)
+
+
+def update_pickup_dispatch(endpoint, secret, sheet_id, dispatch, opener=None):
+    """Set only the implicit dispatch status for an existing pickup row."""
+    return _send(endpoint, secret, sheet_id, 'updatePickupDispatch', dispatch, opener)
 
 
 def upsert_case(endpoint, secret, record, sheet_id=None, opener=None):

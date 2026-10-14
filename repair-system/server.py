@@ -52,6 +52,9 @@ PICKUP_VERIFY_NEXT = 0
 PICKUP_NOTIFICATION_LOCK = threading.Lock()
 PICKUP_GROUP_PATTERN = re.compile(r'C[0-9a-f]{32}\Z')
 PICKUP_NOTIFICATION_RETRY_SECONDS = 23*3600
+PICKUP_DISPATCH_PATTERN = re.compile(r'(R[0-9]{8}-[0-9]{4,})\s*已派車\Z')
+PICKUP_DISPATCH_VERIFIED_FINGERPRINT = ''
+PICKUP_DISPATCH_VERIFY_NEXT = 0
 SERVICE_STARTED = False
 SERVICE_LOCK = threading.Lock()
 @contextmanager
@@ -98,6 +101,10 @@ def init_db():
             state TEXT NOT NULL DEFAULT 'waiting_sheet',created REAL NOT NULL,first_attempt REAL NOT NULL DEFAULT 0,
             attempts INTEGER NOT NULL DEFAULT 0,next_attempt REAL NOT NULL DEFAULT 0,
             last_error TEXT NOT NULL DEFAULT '',result TEXT NOT NULL DEFAULT '',accepted_at TEXT NOT NULL DEFAULT '')''')
+        c.execute('''CREATE TABLE IF NOT EXISTS pickup_dispatch_outbox (
+            case_id TEXT PRIMARY KEY,group_id TEXT NOT NULL,command_id TEXT UNIQUE NOT NULL,created REAL NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt REAL NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',synced_at TEXT NOT NULL DEFAULT '')''')
 init_db()
 
 def pickup_notification_available():
@@ -115,6 +122,7 @@ def cancel_pickup_notifications(c,group_id=None,reason='group_changed'):
     condition=' AND group_id=?' if group_id else ''
     args=(reason,group_id) if group_id else (reason,)
     c.execute("UPDATE pickup_notification_outbox SET state='cancelled',last_error=? WHERE state IN ('waiting_sheet','pending','failed','working','needs_review')"+condition,args)
+    c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error=? WHERE state IN ('pending','failed','working')"+condition,args)
 
 def observe_pickup_group(event):
     """Called only after raw webhook signature and bot destination verification."""
@@ -278,6 +286,124 @@ def retry_pickup_notifications():
             count=c.execute("UPDATE pickup_notification_outbox SET state='pending',next_attempt=0,last_error='' WHERE state='failed' AND group_id=?",(group['group_id'],)).rowcount
     if count: CLOUD_WAKE.set()
     return count
+
+def pickup_dispatch_available():
+    return bool(pickup_notification_available() and pickup_configured())
+
+
+def pickup_dispatch_status():
+    """Admin metadata only; reading never enqueues or contacts any provider."""
+    with connect() as c:
+        group=selected_pickup_group(c)
+        counts={row['state']:row['n'] for row in c.execute('SELECT state,COUNT(*) AS n FROM pickup_dispatch_outbox GROUP BY state')}
+        last=c.execute("SELECT MAX(synced_at) FROM pickup_dispatch_outbox WHERE state='completed'").fetchone()[0]
+    available=pickup_dispatch_available()
+    return {'available':available,'enabled':bool(available and active_pickup_group(group)),
+            'pending':counts.get('pending',0)+counts.get('working',0),'failed':counts.get('failed',0),
+            'completed':counts.get('completed',0),'lastSynced':last or ''}
+
+
+def enqueue_pickup_dispatch(event):
+    """Accept only a signed group command after webhook destination verification."""
+    if not pickup_dispatch_available() or event.get('type')!='message': return False
+    source=event.get('source',{}); message=event.get('message',{})
+    if not isinstance(source,dict) or source.get('type')!='group' or not isinstance(message,dict) or message.get('type')!='text': return False
+    text=message.get('text'); command_id=event.get('webhookEventId'); stamp=event.get('timestamp')
+    if (not isinstance(text,str) or not isinstance(command_id,str) or not re.fullmatch(r'[!-~]{1,128}',command_id)
+            or type(stamp) is not int or stamp<=0 or stamp>int(time.time()*1000)+300000): return False
+    match=PICKUP_DISPATCH_PATTERN.fullmatch(text.strip())
+    if not match or len(match[1])>80: return False
+    case_id=match[1]
+    with PICKUP_NOTIFICATION_LOCK:
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            group=selected_pickup_group(c)
+            if not active_pickup_group(group) or source.get('groupId')!=group['group_id'] or stamp<group['event_stamp']: return False
+            case=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
+            if not case or not pickup_eligible(dict(case)): return False
+            inserted=c.execute('''INSERT OR IGNORE INTO pickup_dispatch_outbox(case_id,group_id,command_id,created)
+                VALUES(?,?,?,?)''',(case_id,group['group_id'],command_id,time.time())).rowcount
+    if inserted: CLOUD_WAKE.set()
+    return bool(inserted)
+
+
+def pickup_dispatch_ping(endpoint,secret,sheet_id):
+    from cloud_support import pickup_dispatch_ping as send_ping
+    return send_ping(endpoint,secret,sheet_id)
+
+
+def pickup_dispatch_update(endpoint,secret,sheet_id,dispatch):
+    from cloud_support import update_pickup_dispatch
+    return update_pickup_dispatch(endpoint,secret,sheet_id,dispatch)
+
+
+def pickup_dispatch_process_once():
+    """Durable, idempotent existing-row update; never send LINE or change cases."""
+    global PICKUP_DISPATCH_VERIFIED_FINGERPRINT,PICKUP_DISPATCH_VERIFY_NEXT
+    if not pickup_dispatch_available(): return {'processed':False,'state':'not_available'}
+    # Binding and membership cannot change while this immutable command is sent.
+    with PICKUP_NOTIFICATION_LOCK:
+        with CLOUD_LOCK:
+            stamp=time.time(); values=cloud_settings()
+            with connect() as c:
+                row=c.execute("SELECT * FROM pickup_dispatch_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=? ORDER BY next_attempt,case_id LIMIT 1",(stamp,)).fetchone()
+                if not row: return {'processed':False,'state':'idle'}
+                group=selected_pickup_group(c)
+                if not group or not group['active'] or row['group_id']!=group['group_id']:
+                    c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error='group_inactive' WHERE case_id=?",(row['case_id'],))
+                    return {'processed':True,'state':'cancelled'}
+                if not active_pickup_group(group): return {'processed':False,'state':'group_verification_pending'}
+                case=c.execute('SELECT * FROM cases WHERE id=?',(row['case_id'],)).fetchone()
+                if not case or not pickup_eligible(dict(case)):
+                    c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=?",(row['case_id'],))
+                    return {'processed':True,'state':'cancelled'}
+            fingerprint=cloud_fingerprint(values)
+            if PICKUP_DISPATCH_VERIFIED_FINGERPRINT!=fingerprint:
+                if stamp<PICKUP_DISPATCH_VERIFY_NEXT: return {'processed':False,'state':'verification_pending'}
+                try: verified=pickup_dispatch_ping(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'])
+                except Exception: verified=None
+                if not isinstance(verified,dict) or verified.get('state')!='synced':
+                    PICKUP_DISPATCH_VERIFY_NEXT=stamp+60
+                    return {'processed':False,'state':'verification_failed'}
+                PICKUP_DISPATCH_VERIFIED_FINGERPRINT=fingerprint; PICKUP_DISPATCH_VERIFY_NEXT=0
+            with connect() as c:
+                c.execute('BEGIN IMMEDIATE')
+                row=c.execute("SELECT * FROM pickup_dispatch_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=? ORDER BY next_attempt,case_id LIMIT 1",(stamp,)).fetchone()
+                if not row: return {'processed':False,'state':'idle'}
+                # A provider check happens outside a DB transaction; re-read the
+                # saved case before claiming, without rewriting any case fields.
+                case=c.execute('SELECT * FROM cases WHERE id=?',(row['case_id'],)).fetchone()
+                if not case or not pickup_eligible(dict(case)):
+                    c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=?",(row['case_id'],))
+                    return {'processed':True,'state':'cancelled'}
+                job=dict(row); attempts=job['attempts']+1
+                c.execute("UPDATE pickup_dispatch_outbox SET state='working',attempts=?,next_attempt=? WHERE case_id=?",(attempts,stamp+90,job['case_id']))
+            dispatch={'caseId':job['case_id'],'commandId':job['command_id']}
+            try:
+                result=pickup_dispatch_update(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'],dispatch)
+                synced=isinstance(result,dict) and result.get('state')=='synced'
+            except Exception: synced=False
+            finished=time.time(); state='completed' if synced else 'failed'
+            with connect() as c:
+                c.execute('''UPDATE pickup_dispatch_outbox SET state=?,next_attempt=?,last_error=?,synced_at=?
+                    WHERE case_id=? AND command_id=? AND state='working' ''',
+                    (state,0 if synced else finished+min(3600,30*2**min(attempts-1,7)),
+                     '' if synced else 'pickup_dispatch_failed',cloud_timestamp(finished) if synced else '',job['case_id'],job['command_id']))
+            return {'processed':True,'state':state}
+
+
+def retry_pickup_dispatches():
+    """Retry only existing failed commands with the original case/event/group."""
+    global PICKUP_DISPATCH_VERIFY_NEXT
+    with PICKUP_NOTIFICATION_LOCK:
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE'); group=selected_pickup_group(c)
+            if not active_pickup_group(group): return 0
+            count=c.execute("UPDATE pickup_dispatch_outbox SET state='pending',next_attempt=0,last_error='' WHERE state='failed' AND group_id=?",(group['group_id'],)).rowcount
+    if count:
+        PICKUP_DISPATCH_VERIFY_NEXT=0; CLOUD_WAKE.set()
+    return count
+
 
 def validated_entry_claim(session):
     """Revalidate only the ticket already proved by this verified session."""
@@ -541,13 +667,14 @@ def start_cloud_worker():
         c.execute("UPDATE pickup_outbox SET state='pending',next_attempt=0 WHERE state='working'")
         c.execute("UPDATE pickup_sync_runs SET state='interrupted',finished=? WHERE state='working'",(time.time(),))
         c.execute("UPDATE pickup_notification_outbox SET state='pending',next_attempt=0 WHERE state='working'")
+        c.execute("UPDATE pickup_dispatch_outbox SET state='pending',next_attempt=0 WHERE state='working'")
     if cloud_configured():
         try: backfill_cloud_cases()
         except Exception: pass
     def worker():
         while True:
             processed=False
-            for operation in (cloud_process_once,pickup_process_once,pickup_notification_process_once):
+            for operation in (cloud_process_once,pickup_process_once,pickup_notification_process_once,pickup_dispatch_process_once):
                 try: processed=operation()['processed'] or processed
                 except Exception: pass
             if processed: continue
@@ -570,7 +697,7 @@ def public_cloud_status():
                 'verified':bool(PICKUP_VERIFIED_FINGERPRINT and PICKUP_VERIFIED_FINGERPRINT==cloud_fingerprint(values)),
                 'pending':pickup_pending,'failed':pickup_failed,'lastSynced':cloud_timestamp(pickup_last) if pickup_last else '',
                 'sheetUrl':'https://docs.google.com/spreadsheets/d/'+PICKUP_SHEET_ID+'/edit#gid='+str(PICKUP_SHEET_GID)},
-            'pickupNotificationAvailable':pickup_notification_available()}
+            'pickupNotificationAvailable':pickup_notification_available(),'pickupDispatchAvailable':pickup_dispatch_available()}
 
 def admin_connection_status():
     """Return an explicit metadata allowlist, never configuration secrets."""
@@ -720,6 +847,11 @@ class Handler(BaseHTTPRequestHandler):
             if not u: return self.send(401,{'error':'請先登入'})
             if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
             return self.send(200,pickup_notification_status())
+        if path=='/api/pickup-dispatch-status':
+            u=self.user()
+            if not u: return self.send(401,{'error':'請先登入'})
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            return self.send(200,pickup_dispatch_status())
         if path=='/api/admin-connection-status':
             u=self.user()
             if not u: return self.send(401,{'error':'請先登入'})
@@ -922,6 +1054,12 @@ class Handler(BaseHTTPRequestHandler):
             if not pickup_notification_available(): return self.send(503,{'error':'LINE 群組通知尚未設定'})
             count=retry_pickup_notifications()
             return self.send(200,{'ok':True,'queued':count,**pickup_notification_status()})
+        if path=='/api/pickup-dispatch-retry':
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            if data: return self.send(400,{'error':'此功能只重試既有派車指令，不接受指定案件或狀態'})
+            if not pickup_dispatch_available(): return self.send(503,{'error':'派車指令同步尚未設定'})
+            count=retry_pickup_dispatches()
+            return self.send(200,{'ok':True,'queued':count,**pickup_dispatch_status()})
         if path=='/api/line-handshake':
             if DEMO or not MESSAGE_SECRET or not BOT_UID: return self.send(503,{'error':'官方 LINE 連線確認尚未設定'})
             case_id=data.get('caseId')
@@ -1039,6 +1177,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(source,dict): continue
             if source.get('type')=='group':
                 observe_pickup_group(event)
+                enqueue_pickup_dispatch(event)
                 continue
             if not isinstance(message,dict): continue
             if event.get('type')!='message' or source.get('type')!='user' or message.get('type')!='text': continue
