@@ -4,7 +4,7 @@ from pathlib import Path
 from http.cookies import SimpleCookie
 from contextlib import contextmanager, closing
 from line_support import load_private_config, verify_id_token, validate_webhook_signature, inspect_bot, get_profile, send_push, send_reply, get_webhook_endpoint, set_webhook_endpoint
-from cloud_support import build_payload, init_queue, validate_endpoint, validate_secret
+from cloud_support import build_payload, init_queue, validate_endpoint, validate_secret, PRIMARY_SHEET_ID, PICKUP_SHEET_ID, PICKUP_SHEET_GID
 
 ROOT = Path(__file__).parent
 CLOUD_DEPLOYMENT = os.environ.get('REPAIR_DEPLOYMENT','').strip().lower()=='cloud'
@@ -47,6 +47,8 @@ CLOUD_LOCK = threading.Lock()
 CLOUD_WORKER_STARTED = False
 CLOUD_VERIFIED_FINGERPRINT = ''
 CLOUD_VERIFY_NEXT = 0
+PICKUP_VERIFIED_FINGERPRINT = ''
+PICKUP_VERIFY_NEXT = 0
 SERVICE_STARTED = False
 SERVICE_LOCK = threading.Lock()
 @contextmanager
@@ -74,6 +76,12 @@ def init_db():
             c.execute('ALTER TABLE line_outbox ADD COLUMN created REAL NOT NULL DEFAULT 0')
         init_queue(c)
         c.execute('CREATE TABLE IF NOT EXISTS cloud_sync_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,case_id TEXT NOT NULL,revision INTEGER NOT NULL,started REAL NOT NULL,finished REAL NOT NULL DEFAULT 0,state TEXT NOT NULL,error TEXT NOT NULL DEFAULT "")')
+        c.execute('''CREATE TABLE IF NOT EXISTS pickup_outbox (
+            case_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,payload TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt REAL NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',
+            synced_at TEXT NOT NULL DEFAULT '',enrolled_at TEXT NOT NULL)''')
+        c.execute('CREATE TABLE IF NOT EXISTS pickup_sync_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,case_id TEXT NOT NULL,revision INTEGER NOT NULL,started REAL NOT NULL,finished REAL NOT NULL DEFAULT 0,state TEXT NOT NULL,error TEXT NOT NULL DEFAULT "")')
 init_db()
 
 def validated_entry_claim(session):
@@ -131,13 +139,48 @@ def cloud_upsert(endpoint,secret,sheet_id,record):
     from cloud_support import upsert
     return upsert(endpoint,secret,sheet_id,record)
 
+def pickup_configured(values=None):
+    values=values or cloud_settings()
+    return not DEMO and cloud_configured(values) and values['googleSheetId']==PRIMARY_SHEET_ID
+
+def pickup_ping(endpoint,secret,sheet_id):
+    from cloud_support import pickup_ping as send_ping
+    return send_ping(endpoint,secret,sheet_id)
+
+def pickup_upsert(endpoint,secret,sheet_id,record):
+    from cloud_support import upsert_pickup
+    return upsert_pickup(endpoint,secret,sheet_id,record)
+
+def pickup_health():
+    """Verify only fixed receiver metadata; never enroll, write cases or notify LINE."""
+    global PICKUP_VERIFIED_FINGERPRINT,PICKUP_VERIFY_NEXT
+    with CLOUD_LOCK:
+        values=cloud_settings()
+        if not pickup_configured(values): return None
+        fingerprint=cloud_fingerprint(values)
+        try: result=pickup_ping(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'])
+        except Exception: result=None
+        if not isinstance(result,dict) or result.get('state')!='synced':
+            PICKUP_VERIFIED_FINGERPRINT=''; PICKUP_VERIFY_NEXT=time.time()+60
+            return False
+        PICKUP_VERIFIED_FINGERPRINT=fingerprint; PICKUP_VERIFY_NEXT=0
+        return {'ok':True,'enabled':True,'verified':True,'scope':'new_cases_only',
+                'sheetUrl':'https://docs.google.com/spreadsheets/d/'+PICKUP_SHEET_ID+'/edit#gid='+str(PICKUP_SHEET_GID)}
+
+def pickup_eligible(case):
+    """Only exact live pickup submissions from verified LINE identity rows."""
+    uid=case.get('user_id',''); data=case.get('data',{})
+    if isinstance(data,str): data=json.loads(data)
+    return (not DEMO and isinstance(uid,str) and bool(re.fullmatch(r'U[0-9a-f]{32}',uid))
+            and isinstance(data,dict) and data.get('shipping')=='由客服派遣物流回收')
+
 def cloud_timestamp(stamp=None):
     return time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime((time.time() if stamp is None else stamp)+8*3600))
 
 def cloud_fingerprint(values):
     return hashlib.sha256(json.dumps(values,sort_keys=True).encode()).hexdigest()
 
-def enqueue_cloud_case(c,case_id):
+def enqueue_cloud_case(c,case_id,refresh_pickup=True):
     """Use the same transaction as each local case mutation; never call Google."""
     row=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
     if not row: return
@@ -147,14 +190,35 @@ def enqueue_cloud_case(c,case_id):
     receipt=c.execute('SELECT summary_received FROM line_receipts WHERE case_id=?',(case_id,)).fetchone()
     case['lineSummaryReceivedAt']=receipt['summary_received'] if receipt else ''
     prior=c.execute('SELECT revision FROM cloud_outbox WHERE case_id=?',(case_id,)).fetchone()
-    revision=max(case['cloud_revision'],prior['revision'] if prior else 0)+1
+    prior_pickup=c.execute('SELECT revision FROM pickup_outbox WHERE case_id=?',(case_id,)).fetchone()
+    revision=max(case['cloud_revision'],prior['revision'] if prior else 0,prior_pickup['revision'] if prior_pickup else 0)+1
     record=build_payload(case,revision,cloud_timestamp())
     c.execute('UPDATE cases SET cloud_revision=? WHERE id=?',(revision,case_id))
     c.execute('''INSERT INTO cloud_outbox(case_id,revision,payload) VALUES(?,?,?)
         ON CONFLICT(case_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload,
         state='pending',attempts=0,next_attempt=0,last_error='' ''',
         (case_id,revision,json.dumps(record,ensure_ascii=False)))
+    # Updating or retrying a legacy case must never enroll it in pickup sync.
+    # Refresh only rows explicitly enrolled inside their new case INSERT.
+    if refresh_pickup and prior_pickup:
+        if pickup_eligible(case):
+            c.execute('''UPDATE pickup_outbox SET revision=?,payload=?,state='pending',
+                attempts=0,next_attempt=0,last_error='' WHERE case_id=?''',
+                (revision,json.dumps(record,ensure_ascii=False),case_id))
+        else:
+            c.execute("UPDATE pickup_outbox SET state='skipped',next_attempt=0,last_error='' WHERE case_id=?",(case_id,))
     CLOUD_WAKE.set()
+
+def enroll_new_pickup_case(c,case_id):
+    """Call only inside a successful new case INSERT transaction, never backfill."""
+    row=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
+    if not row or not pickup_eligible(dict(row)): return False
+    queued=c.execute('SELECT revision,payload FROM cloud_outbox WHERE case_id=?',(case_id,)).fetchone()
+    if not queued: return False
+    cursor=c.execute('''INSERT OR IGNORE INTO pickup_outbox(case_id,revision,payload,enrolled_at)
+        VALUES(?,?,?,?)''',(case_id,queued['revision'],queued['payload'],cloud_timestamp()))
+    if cursor.rowcount: CLOUD_WAKE.set()
+    return bool(cursor.rowcount)
 
 def trusted_display_name(value):
     return value if isinstance(value,str) and value.strip() and len(value)<=300 else ''
@@ -175,7 +239,7 @@ def backfill_cloud_cases():
     with connect() as c:
         c.execute('BEGIN IMMEDIATE')
         ids=[row['id'] for row in c.execute('SELECT id FROM cases')]
-        for case_id in ids: enqueue_cloud_case(c,case_id)
+        for case_id in ids: enqueue_cloud_case(c,case_id,refresh_pickup=False)
     return len(ids)
 
 def cloud_process_once():
@@ -216,6 +280,61 @@ def cloud_process_once():
                 c.execute("UPDATE cloud_outbox SET state='failed',attempts=?,next_attempt=?,last_error=? WHERE case_id=? AND revision=?",(attempts,finished+delay,error,job['case_id'],job['revision']))
         return {'processed':True,'state':state}
 
+def pickup_process_once():
+    """Independent delivery/retry, restricted to durably enrolled new cases."""
+    global PICKUP_VERIFIED_FINGERPRINT,PICKUP_VERIFY_NEXT
+    with CLOUD_LOCK:
+        values=cloud_settings()
+        if not pickup_configured(values): return {'processed':False,'state':'not_configured'}
+        stamp=time.time()
+        with connect() as c:
+            row=c.execute("SELECT * FROM pickup_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=? ORDER BY next_attempt,case_id LIMIT 1",(stamp,)).fetchone()
+        if not row: return {'processed':False,'state':'idle'}
+        fingerprint=cloud_fingerprint(values)
+        if PICKUP_VERIFIED_FINGERPRINT!=fingerprint:
+            if stamp<PICKUP_VERIFY_NEXT: return {'processed':False,'state':'verification_pending'}
+            try: verified=pickup_ping(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'])
+            except Exception: verified=None
+            if not isinstance(verified,dict) or verified.get('state')!='synced':
+                PICKUP_VERIFY_NEXT=stamp+60
+                return {'processed':False,'state':'verification_failed'}
+            PICKUP_VERIFIED_FINGERPRINT=fingerprint; PICKUP_VERIFY_NEXT=0
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute("SELECT * FROM pickup_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=? ORDER BY next_attempt,case_id LIMIT 1",(stamp,)).fetchone()
+            if not row: return {'processed':False,'state':'idle'}
+            case=c.execute('SELECT * FROM cases WHERE id=?',(row['case_id'],)).fetchone()
+            if not case or not pickup_eligible(dict(case)):
+                c.execute("UPDATE pickup_outbox SET state='skipped',next_attempt=0,last_error='' WHERE case_id=?",(row['case_id'],))
+                return {'processed':True,'state':'skipped'}
+            job=dict(row)
+            c.execute("UPDATE pickup_outbox SET state='working',next_attempt=? WHERE case_id=? AND revision=?",(stamp+90,job['case_id'],job['revision']))
+            run_id=c.execute('INSERT INTO pickup_sync_runs(case_id,revision,started,state) VALUES(?,?,?,?)',(job['case_id'],job['revision'],stamp,'working')).lastrowid
+        try:
+            result=pickup_upsert(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'],json.loads(job['payload']))
+            synced=isinstance(result,dict) and result.get('state')=='synced'
+        except Exception: synced=False
+        finished=time.time(); state='synced' if synced else 'failed'; error='' if synced else 'pickup_delivery_failed'
+        with connect() as c:
+            c.execute('UPDATE pickup_sync_runs SET finished=?,state=?,error=? WHERE id=?',(finished,state,error,run_id))
+            if synced:
+                c.execute("UPDATE pickup_outbox SET state='synced',last_error='',synced_at=? WHERE case_id=? AND revision=?",(cloud_timestamp(),job['case_id'],job['revision']))
+            else:
+                attempts=job['attempts']+1
+                delay=min(3600,30*2**min(attempts-1,7))
+                c.execute("UPDATE pickup_outbox SET state='failed',attempts=?,next_attempt=?,last_error=? WHERE case_id=? AND revision=?",(attempts,finished+delay,error,job['case_id'],job['revision']))
+        return {'processed':True,'state':state}
+
+def retry_existing_pickups():
+    """Retry existing failed/pending enrollments only; never create jobs or LINE messages."""
+    global PICKUP_VERIFY_NEXT
+    with connect() as c:
+        cursor=c.execute("UPDATE pickup_outbox SET state='pending',next_attempt=0,last_error='' WHERE state IN ('pending','failed')")
+    if cursor.rowcount:
+        PICKUP_VERIFY_NEXT=0
+        CLOUD_WAKE.set()
+    return cursor.rowcount
+
 def start_cloud_worker():
     global CLOUD_WORKER_STARTED
     if CLOUD_WORKER_STARTED: return
@@ -223,14 +342,18 @@ def start_cloud_worker():
     with connect() as c:
         c.execute("UPDATE cloud_outbox SET state='pending',next_attempt=0 WHERE state='working'")
         c.execute("UPDATE cloud_sync_runs SET state='interrupted',finished=? WHERE state='working'",(time.time(),))
+        c.execute("UPDATE pickup_outbox SET state='pending',next_attempt=0 WHERE state='working'")
+        c.execute("UPDATE pickup_sync_runs SET state='interrupted',finished=? WHERE state='working'",(time.time(),))
     if cloud_configured():
         try: backfill_cloud_cases()
         except Exception: pass
     def worker():
         while True:
-            try:
-                if cloud_process_once()['processed']: continue
-            except Exception: pass
+            processed=False
+            for operation in (cloud_process_once,pickup_process_once):
+                try: processed=operation()['processed'] or processed
+                except Exception: pass
+            if processed: continue
             CLOUD_WAKE.wait(5); CLOUD_WAKE.clear()
     threading.Thread(target=worker,name='repair-cloud-sync',daemon=True).start()
 
@@ -241,8 +364,15 @@ def public_cloud_status():
         pending=c.execute("SELECT COUNT(*) FROM cloud_outbox WHERE state IN ('pending','working')").fetchone()[0]
         failed=c.execute("SELECT COUNT(*) FROM cloud_outbox WHERE state='failed'").fetchone()[0]
         last=c.execute("SELECT MAX(finished) FROM cloud_sync_runs WHERE state='synced'").fetchone()[0]
+        pickup_pending=c.execute("SELECT COUNT(*) FROM pickup_outbox WHERE state IN ('pending','working')").fetchone()[0]
+        pickup_failed=c.execute("SELECT COUNT(*) FROM pickup_outbox WHERE state='failed'").fetchone()[0]
+        pickup_last=c.execute("SELECT MAX(finished) FROM pickup_sync_runs WHERE state='synced'").fetchone()[0]
     return {'configured':cloud_configured(values),'sheetUrl':'https://docs.google.com/spreadsheets/d/'+sheet_id+'/edit' if valid_id else '',
-            'pending':pending,'failed':failed,'lastSynced':cloud_timestamp(last) if last else ''}
+            'pending':pending,'failed':failed,'lastSynced':cloud_timestamp(last) if last else '',
+            'pickupEnabled':not DEMO,'pickup':{'configured':pickup_configured(values),
+                'verified':bool(PICKUP_VERIFIED_FINGERPRINT and PICKUP_VERIFIED_FINGERPRINT==cloud_fingerprint(values)),
+                'pending':pickup_pending,'failed':pickup_failed,'lastSynced':cloud_timestamp(pickup_last) if pickup_last else '',
+                'sheetUrl':'https://docs.google.com/spreadsheets/d/'+PICKUP_SHEET_ID+'/edit#gid='+str(PICKUP_SHEET_GID)}}
 
 def admin_connection_status():
     """Return an explicit metadata allowlist, never configuration secrets."""
@@ -379,6 +509,14 @@ class Handler(BaseHTTPRequestHandler):
             if not u: return self.send(401,{'error':'請先登入'})
             if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
             return self.send(200,public_cloud_status())
+        if path=='/api/pickup-health':
+            u=self.user()
+            if not u: return self.send(401,{'error':'請先登入'})
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            result=pickup_health()
+            if result is None: return self.send(503,{'error':'派車回收名單同步尚未設定'})
+            if result is False: return self.send(502,{'error':'無法驗證派車回收名單同步連線'})
+            return self.send(200,result)
         if path=='/api/admin-connection-status':
             u=self.user()
             if not u: return self.send(401,{'error':'請先登入'})
@@ -559,6 +697,11 @@ class Handler(BaseHTTPRequestHandler):
             if not cloud_configured(): return self.send(503,{'error':'請先完成本機雲端同步設定'})
             count=backfill_cloud_cases()
             return self.send(200,{'ok':True,'queued':count,**public_cloud_status()})
+        if path=='/api/pickup-retry':
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            if not pickup_configured(): return self.send(503,{'error':'請先完成派車回收名單同步設定'})
+            count=retry_existing_pickups()
+            return self.send(200,{'ok':True,'queued':count,**public_cloud_status()})
         if path=='/api/line-handshake':
             if DEMO or not MESSAGE_SECRET or not BOT_UID: return self.send(503,{'error':'官方 LINE 連線確認尚未設定'})
             case_id=data.get('caseId')
@@ -631,6 +774,7 @@ class Handler(BaseHTTPRequestHandler):
                 history=json.dumps([{'time':now,'status':'已申請','by':'客戶'}],ensure_ascii=False)
                 c.execute('INSERT INTO cases(id,user_id,request_id,data,status,created,history,line_display_name) VALUES(?,?,?,?,?,?,?,?)',(ident,u['id'],rid,json.dumps(clean,ensure_ascii=False),'已申請',now,history,trusted_display_name(u.get('displayName'))))
                 enqueue_cloud_case(c,ident)
+                enroll_new_pickup_case(c,ident)
             result=notify({'user_id':u['id'],'id':ident,'status':'已申請','data':clean,'history':history})
             with connect() as c:
                 c.execute('UPDATE cases SET notification=? WHERE id=?',(result,ident)); enqueue_cloud_case(c,ident); row=c.execute('SELECT * FROM cases WHERE id=?',(ident,)).fetchone()

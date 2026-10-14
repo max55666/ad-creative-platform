@@ -32,6 +32,9 @@ CASE_FIELDS = {
     'shippingNote', 'lineSummaryReceivedAt', 'revision',
 }
 MAX_BODY = 120000
+PRIMARY_SHEET_ID = '1C5gGI4cL4lgw-GqSXRcQuicM2e5FvDHp-bnfqpMcnqI'
+PICKUP_SHEET_ID = '11T4F5krGq2rzDRy9ICE6dQA1f7f2xX22OoLhHK117-Q'
+PICKUP_SHEET_GID = 1272115939
 ACKS = [
     '我已確認箱內只有主機本體與電源線。',
     '我已理解清潔規範。',
@@ -166,12 +169,22 @@ def _send(endpoint, secret, sheet_id, operation, record=None, opener=None):
         validate_secret(secret)
         if not isinstance(sheet_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{20,100}', sheet_id):
             raise ValueError('sheet id')
-        if operation == 'upsert':
+        if operation not in ('ping', 'upsert', 'pingPickup', 'upsertPickup'):
+            raise ValueError('operation')
+        pickup_operation = operation in ('pingPickup', 'upsertPickup')
+        write_operation = operation in ('upsert', 'upsertPickup')
+        if pickup_operation and sheet_id != PRIMARY_SHEET_ID:
+            raise ValueError('pickup request scope')
+        if write_operation:
             validate_record(record)
+        if operation == 'upsertPickup' and (
+                record['shipping'] != '由客服派遣物流回收'
+                or not re.fullmatch(r'U[0-9a-f]{32}', record['lineUserId'])):
+            raise ValueError('pickup eligibility')
     except (ValueError, TypeError, KeyError):
         return {'state': 'failed', 'error': '雲端同步設定或案件格式錯誤'}
     payload = {'secret': secret, 'sheetId': sheet_id, 'operation': operation}
-    if operation == 'upsert':
+    if write_operation:
         payload['case'] = record
     body = json.dumps(payload,
                       ensure_ascii=False, separators=(',', ':')).encode('utf-8')
@@ -186,12 +199,19 @@ def _send(endpoint, secret, sheet_id, operation, record=None, opener=None):
             if response.status != 200 or len(raw) > 8192:
                 raise ValueError('invalid response')
             result = json.loads(raw)
+        expected_schema = 'petpivot-pickup-v1' if pickup_operation else 'petpivot-v1'
         valid = (isinstance(result, dict) and result.get('ok') is True
-                 and result.get('sheetId') == sheet_id and result.get('schema') == 'petpivot-v1')
-        if operation == 'upsert':
+                 and result.get('sheetId') == sheet_id and result.get('schema') == expected_schema)
+        if pickup_operation:
+            valid = (valid and result.get('pickupSheetId') == PICKUP_SHEET_ID
+                     and type(result.get('pickupSheetGid')) is int
+                     and result.get('pickupSheetGid') == PICKUP_SHEET_GID)
+        if write_operation:
             valid = (valid and result.get('caseId') == record['id']
                      and result.get('revision') == record['revision']
                      and result.get('action') in ('inserted', 'updated', 'unchanged', 'stale'))
+            if pickup_operation:
+                valid = valid and type(result.get('revision')) is int
         if not valid:
             if isinstance(result, dict) and result.get('error') == 'unauthorized':
                 return {'state': 'failed', 'error': '雲端同步金鑰不符'}
@@ -222,6 +242,16 @@ def ping(endpoint, secret, sheet_id, opener=None):
 
 def upsert(endpoint, secret, sheet_id, record, opener=None):
     return _send(endpoint, secret, sheet_id, 'upsert', record, opener)
+
+
+def pickup_ping(endpoint, secret, sheet_id, opener=None):
+    """Read-only check of the fixed pickup file, using the existing deployment."""
+    return _send(endpoint, secret, sheet_id, 'pingPickup', opener=opener)
+
+
+def upsert_pickup(endpoint, secret, sheet_id, record, opener=None):
+    """Deliver an eligible, already enrolled new case to the fixed pickup file."""
+    return _send(endpoint, secret, sheet_id, 'upsertPickup', record, opener)
 
 
 def upsert_case(endpoint, secret, record, sheet_id=None, opener=None):
