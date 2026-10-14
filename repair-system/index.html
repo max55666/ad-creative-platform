@@ -127,7 +127,7 @@ async function loadPickupDispatchStatus(){
   const node=document.getElementById('pickupDispatchContainer');if(!node||!user?.admin)return;
   try{
     const status=await api('/api/pickup-dispatch-status');if(!user?.admin||!document.contains(node))return;
-    node.innerHTML='<section class="panel"><h3>群組派車回報</h3><p class="muted">在已連接的派車群組傳送「R20261015-0001已派車」，會更新對應案件的「派車狀態」。請替換成實際送修編號。</p>'+connectionDetails([
+    node.innerHTML='<section class="panel"><h3>群組派車回報</h3><p class="muted">在已連接的派車群組傳送「R20261015-0001已派車」，會將空白的「派車狀態」填為「已派車」。手動清空後可以再次傳送；已填入的其他狀態會保留。請替換成實際送修編號。</p>'+connectionDetails([
       ['群組回報',status.enabled?'已啟用':'群組或同步連線尚未就緒'],['待更新',String(status.pending||0)+' 筆'],['需處理',String(status.failed||0)+' 筆'],['更新完成',String(status.completed||0)+' 筆'],['最近更新',status.lastSynced||'尚無回報紀錄']
     ])+'<div class="toolbar"><button id="refreshPickupDispatch" class="outline" onclick="action(refreshPickupDispatch)">更新回報狀態</button><button id="retryPickupDispatch" class="outline" onclick="action(retryPickupDispatch)"'+(!status.enabled?' disabled':'')+'>重試未完成回報</button></div><p id="pickupDispatchResult" class="muted" role="status" aria-live="polite"></p></section>';
   }catch(_){throw new Error('無法讀取派車回報狀態，請稍後再更新。')}

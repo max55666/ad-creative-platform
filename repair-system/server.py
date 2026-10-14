@@ -105,6 +105,16 @@ def init_db():
             case_id TEXT PRIMARY KEY,group_id TEXT NOT NULL,command_id TEXT UNIQUE NOT NULL,created REAL NOT NULL,
             state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt REAL NOT NULL DEFAULT 0,
             last_error TEXT NOT NULL DEFAULT '',synced_at TEXT NOT NULL DEFAULT '')''')
+        if 'event_stamp' not in [row['name'] for row in c.execute('PRAGMA table_info(pickup_dispatch_outbox)')]:
+            c.execute('ALTER TABLE pickup_dispatch_outbox ADD COLUMN event_stamp INTEGER NOT NULL DEFAULT 0')
+        c.execute('''CREATE TABLE IF NOT EXISTS pickup_dispatch_events (
+            event_id TEXT PRIMARY KEY,case_id TEXT NOT NULL,event_stamp INTEGER NOT NULL)''')
+        c.execute('CREATE INDEX IF NOT EXISTS pickup_dispatch_events_case_stamp ON pickup_dispatch_events(case_id,event_stamp)')
+        # Older jobs did not retain the LINE event timestamp. Preserve their
+        # event IDs and conservatively seed the watermark from receipt time.
+        c.execute('UPDATE pickup_dispatch_outbox SET event_stamp=CAST(created*1000 AS INTEGER) WHERE event_stamp=0')
+        c.execute('''INSERT OR IGNORE INTO pickup_dispatch_events(event_id,case_id,event_stamp)
+            SELECT command_id,case_id,event_stamp FROM pickup_dispatch_outbox''')
 init_db()
 
 def pickup_notification_available():
@@ -321,8 +331,19 @@ def enqueue_pickup_dispatch(event):
             if not active_pickup_group(group) or source.get('groupId')!=group['group_id'] or stamp<group['event_stamp']: return False
             case=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
             if not case or not pickup_eligible(dict(case)): return False
-            inserted=c.execute('''INSERT OR IGNORE INTO pickup_dispatch_outbox(case_id,group_id,command_id,created)
-                VALUES(?,?,?,?)''',(case_id,group['group_id'],command_id,time.time())).rowcount
+            latest=c.execute('SELECT MAX(event_stamp) FROM pickup_dispatch_events WHERE case_id=?',(case_id,)).fetchone()[0]
+            # Record every valid event once, including repetitions received
+            # while another command is in flight. Such events are never replayed.
+            if not c.execute('INSERT OR IGNORE INTO pickup_dispatch_events(event_id,case_id,event_stamp) VALUES(?,?,?)',
+                             (command_id,case_id,stamp)).rowcount: return False
+            if latest is not None and stamp<=latest: return False
+            prior=c.execute('SELECT state FROM pickup_dispatch_outbox WHERE case_id=?',(case_id,)).fetchone()
+            if prior and prior['state'] not in ('completed','cancelled'): return False
+            inserted=c.execute('''INSERT INTO pickup_dispatch_outbox(case_id,group_id,command_id,created,event_stamp)
+                VALUES(?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET group_id=excluded.group_id,
+                command_id=excluded.command_id,created=excluded.created,event_stamp=excluded.event_stamp,
+                state='pending',attempts=0,next_attempt=0,last_error='',synced_at='' ''',
+                (case_id,group['group_id'],command_id,time.time(),stamp)).rowcount
     if inserted: CLOUD_WAKE.set()
     return bool(inserted)
 
