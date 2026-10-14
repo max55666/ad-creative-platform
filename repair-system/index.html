@@ -107,10 +107,55 @@ function openCase(id,admin){selected=cases.find(c=>c.id===id);document.getElemen
 async function update(){let f=document.getElementById('edit');let b=f.querySelector('button');b.disabled=true;try{await api('/api/update',{id:selected.id,status:f.elements.status.value,note:f.elements.note.value});cases=(await api('/api/cases')).cases;render()}finally{b.disabled=false}}
 async function retry(){await api('/api/retry',{id:selected.id});cases=(await api('/api/cases')).cases;render()}
 async function demoAdminLogin(){await api("/api/demo-admin",{});user=(await api("/api/me")).user;cases=(await api("/api/cases")).cases;render()}
-function renderAdmin(){if(!user?.admin){app.innerHTML='<div class="card"><h2>維修管理後台</h2><p class="muted">請以管理員密碼登入。</p><button id="demoAdmin" class="line" type="button" onclick="action(demoAdminLogin)">使用測試管理員體驗</button><form id="adminLogin"><label class="field">管理員密碼<input type="password" name="password" required autocomplete="current-password"></label><button style="margin-top:18px" type="submit">登入後台</button></form></div>';document.getElementById('demoAdmin').classList.toggle('hidden',!config.demo);document.getElementById('adminLogin').onsubmit=e=>{e.preventDefault();action(async()=>{await api('/api/admin-login',{password:e.target.elements.password.value});user=(await api('/api/me')).user;cases=(await api('/api/cases')).cases;render()})};return}renderCases(true);app.insertAdjacentHTML('afterbegin','<div class="toolbar"><a class="button outline" href="/">客戶申請頁</a><a class="button outline" href="http://127.0.0.1:8787/setup-line" target="_blank" rel="noopener">LINE 連線設定</a><a class="button outline" href="http://127.0.0.1:8787/setup-cloud" target="_blank" rel="noopener">雲端試算表設定</a><button class="outline" onclick="action(logout)">登出管理員</button></div><p class="muted">連線設定請在執行此系統的電腦開啟。</p><section class="card"><h3>雲端試算表同步</h3><p id="cloudStatus" class="muted" role="status">正在確認同步狀態…</p><div class="toolbar"><a id="cloudSheetLink" class="button outline" target="_blank" rel="noopener" href="https://docs.google.com/spreadsheets/d/1C5gGI4cL4lgw-GqSXRcQuicM2e5FvDHp-bnfqpMcnqI/edit">開啟雲端案件表</a><button class="outline" onclick="action(refreshCloudStatus)">更新同步狀態</button><button class="outline" onclick="action(retryCloud)">重試雲端同步</button><button id="syncLineNames" class="outline" onclick="action(syncLineNames)">補入 LINE 顯示名稱</button></div><p id="lineNamesResult" class="muted" role="status"></p></section>');refreshCloudStatus().catch(e=>{let node=document.getElementById('cloudStatus');if(node)node.textContent=e.message})}
+
+function adminSettingsSection(){
+  if(location.pathname!=='/admin')return '';
+  const section=new URLSearchParams(location.search).get('settings');
+  return ['line','cloud'].includes(section)?section:'';
+}
+function connectionLink(url,label){return url?'<a class="button outline" href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(label)+'</a>':''}
+function connectionDetails(rows){return '<dl class="kv">'+rows.map(([label,value])=>'<dt>'+esc(label)+'</dt><dd>'+esc(value||'—')+'</dd>').join('')+'</dl>'}
+function renderAdminConnections(section){
+  app.innerHTML='<div class="toolbar"><a class="button outline" href="/admin">返回案件管理</a><a class="button outline" href="/admin?settings=line">LINE 連線設定</a><a class="button outline" href="/admin?settings=cloud">雲端試算表設定</a><button class="outline" onclick="action(logout)">登出管理員</button></div><section id="connectionSettings" class="card"><h2>'+ (section==='line'?'LINE 連線設定':'雲端試算表設定')+'</h2><p class="muted" role="status">正在讀取連線設定…</p></section>';
+  action(()=>loadAdminConnections(section));
+}
+async function loadAdminConnections(section){
+  const settings=await api('/api/admin-connection-status');
+  const node=document.getElementById('connectionSettings');
+  if(!node||!user?.admin||adminSettingsSection()!==section)return;
+  const line=settings.line,cloud=settings.cloud;
+  const maintenance=settings.cloudDeployment?'<div class="notice">系統已在雲端運作。需要修改連線資料時，請開啟「Render 連線設定」，更新私人設定檔並重新部署。</div><div class="toolbar">'+connectionLink(settings.renderSettingsUrl,'Render 連線設定')+'</div>':settings.localSetupEnabled?'<div class="toolbar"><a class="button outline" href="/setup-'+section+'">編輯本機連線設定</a></div>':'<p class="muted">連線資料由主機管理。</p>';
+  if(section==='line'){
+    node.innerHTML='<h2>LINE 連線設定</h2><p class="muted">查看目前使用的帳號與網址，並前往 LINE 管理設定。</p>'+connectionDetails([
+      ['客服官方 LINE',line.oa],['LINE 登入設定',line.loginConfigured?'已設定':'尚未完整設定'],
+      ['訊息服務設定',line.messagingConfigured?'已設定':'尚未完整設定'],['登入頻道 ID',line.loginChannelId],
+      ['訊息頻道 ID',line.messagingChannelId],['LIFF ID',line.liffId],['登入回呼網址',line.callbackUrl],['Webhook 網址',line.webhookUrl]
+    ])+'<div class="toolbar">'+connectionLink(line.loginConsoleUrl,'LINE 登入管理')+connectionLink(line.messagingConsoleUrl,'官方 LINE 訊息管理')+connectionLink(line.liffConsoleUrl,'LIFF 表單設定')+'</div><button id="checkLineConnection" class="outline" onclick="action(checkLineConnection)">檢查 LINE 連線</button><p id="lineConnectionResult" class="muted" role="status"></p>'+maintenance;
+  }else{
+    node.innerHTML='<h2>雲端試算表設定</h2><p class="muted">客戶提交與後台更新的案件會同步至目前連接的 Google 試算表。</p>'+connectionDetails([
+      ['同步設定',cloud.configured?'已完成連線設定':'尚未完整設定'],['同步服務',cloud.endpointConfigured?'已設定':'尚未設定'],
+      ['連線密鑰',cloud.secretConfigured?'已設定':'尚未設定'],['待同步案件',String(cloud.pending||0)+' 筆'],
+      ['暫未成功案件',String(cloud.failed||0)+' 筆'],['最近同步',cloud.lastSynced||'尚無成功同步紀錄']
+    ])+'<div class="toolbar">'+connectionLink(cloud.sheetUrl,'開啟雲端案件表')+connectionLink('https://script.google.com/home','Google 同步程式管理')+'<button id="reloadCloudConnection" class="outline" onclick="action(reloadCloudConnection)">更新同步狀態</button></div><p id="cloudConnectionResult" class="muted" role="status"></p>'+maintenance;
+  }
+}
+async function checkLineConnection(){
+  const button=document.getElementById('checkLineConnection'),result=document.getElementById('lineConnectionResult');
+  button.disabled=true;result.textContent='正在檢查 LINE 連線…';
+  try{
+    const status=await api('/api/line-health');
+    result.textContent=status.webhook.active&&status.webhook.matchesExpected?'LINE 連線正常，Webhook 已啟用且指向目前維修系統。':'已連上官方 LINE，但 Webhook '+(!status.webhook.active?'尚未啟用':'網址尚未指向目前維修系統')+'。請至「官方 LINE 訊息管理」確認設定。';
+  }catch(e){result.textContent=e.message;throw e}finally{if(document.contains(button))button.disabled=false}
+}
+async function reloadCloudConnection(){
+  const button=document.getElementById('reloadCloudConnection');button.disabled=true;
+  try{await loadAdminConnections('cloud');const result=document.getElementById('cloudConnectionResult');if(result)result.textContent='同步狀態已更新。'}finally{if(document.contains(button))button.disabled=false}
+}
+
+function renderAdmin(){if(!user?.admin){app.innerHTML='<div class="card"><h2>維修管理後台</h2><p class="muted">請以管理員密碼登入。</p><button id="demoAdmin" class="line" type="button" onclick="action(demoAdminLogin)">使用測試管理員體驗</button><form id="adminLogin"><label class="field">管理員密碼<input type="password" name="password" required autocomplete="current-password"></label><button style="margin-top:18px" type="submit">登入後台</button></form></div>';document.getElementById('demoAdmin').classList.toggle('hidden',!config.demo);document.getElementById('adminLogin').onsubmit=e=>{e.preventDefault();action(async()=>{await api('/api/admin-login',{password:e.target.elements.password.value});user=(await api('/api/me')).user;if(!adminSettingsSection())cases=(await api('/api/cases')).cases;render()})};return}if(adminSettingsSection()){renderAdminConnections(adminSettingsSection());return}renderCases(true);app.insertAdjacentHTML('afterbegin','<div class="toolbar"><a class="button outline" href="/">客戶申請頁</a><a class="button outline" href="/admin?settings=line">LINE 連線設定</a><a class="button outline" href="/admin?settings=cloud">雲端試算表設定</a><button class="outline" onclick="action(logout)">登出管理員</button></div><p class="muted">可直接從後台查看 LINE 與雲端試算表的連線設定。</p><section class="card"><h3>雲端試算表同步</h3><p id="cloudStatus" class="muted" role="status">正在確認同步狀態…</p><div class="toolbar"><a id="cloudSheetLink" class="button outline" target="_blank" rel="noopener" href="https://docs.google.com/spreadsheets/d/1C5gGI4cL4lgw-GqSXRcQuicM2e5FvDHp-bnfqpMcnqI/edit">開啟雲端案件表</a><button class="outline" onclick="action(refreshCloudStatus)">更新同步狀態</button><button class="outline" onclick="action(retryCloud)">重試雲端同步</button><button id="syncLineNames" class="outline" onclick="action(syncLineNames)">補入 LINE 顯示名稱</button></div><p id="lineNamesResult" class="muted" role="status"></p></section>');refreshCloudStatus().catch(e=>{let node=document.getElementById('cloudStatus');if(node)node.textContent=e.message})}
 async function refreshCloudStatus(){const d=await api('/api/cloud-status');const node=document.getElementById('cloudStatus');if(!node)return;node.textContent=d.configured?'待同步：'+(d.pending||0)+' 筆 · 暫未成功：'+(d.failed||0)+' 筆'+(d.lastSynced?' · 最近同步：'+d.lastSynced:''):'雲端案件表已建立。請先完成「雲端試算表設定」，才會自動同步案件。';if(d.sheetUrl)document.getElementById('cloudSheetLink').href=d.sheetUrl;}
 async function syncLineNames(){const b=document.getElementById('syncLineNames');b.disabled=true;try{const d=await api('/api/line-profiles-sync',{});cases=(await api('/api/cases')).cases;render();document.getElementById('lineNamesResult').textContent='已補入 '+d.updated+' 筆案件的 LINE 顯示名稱，並排入雲端同步。'+(d.unavailable?' 有 '+d.unavailable+' 個帳號目前無法從 LINE 取得名稱，客戶下次以 LINE 登入表單時會再取得。':'')+(d.skippedTest?' '+d.skippedTest+' 筆測試帳號保留原有測試資料。':'');}finally{if(document.contains(b))b.disabled=false}}
 async function retryCloud(){await api('/api/cloud-retry',{});await refreshCloudStatus();}
-action(async()=>{config=await api('/api/config');let lineInitError;try{await repairLine.initialize(config)}catch(e){lineInitError=e}user=(await api('/api/me')).user;document.getElementById('demo').textContent=config.demo?'測試版本 · LINE 尚未正式連接 · 請勿填寫真實個資':'';document.getElementById('demo').classList.toggle('hidden',!config.demo);if(user?.admin)cases=(await api('/api/cases')).cases;render();if(lineInitError)error(lineInitError)});
+action(async()=>{config=await api('/api/config');let lineInitError;try{await repairLine.initialize(config)}catch(e){lineInitError=e}user=(await api('/api/me')).user;document.getElementById('demo').textContent=config.demo?'測試版本 · LINE 尚未正式連接 · 請勿填寫真實個資':'';document.getElementById('demo').classList.toggle('hidden',!config.demo);if(user?.admin&&!adminSettingsSection())cases=(await api('/api/cases')).cases;render();if(lineInitError)error(lineInitError)});
 </script></body></html>
 

@@ -244,6 +244,27 @@ def public_cloud_status():
     return {'configured':cloud_configured(values),'sheetUrl':'https://docs.google.com/spreadsheets/d/'+sheet_id+'/edit' if valid_id else '',
             'pending':pending,'failed':failed,'lastSynced':cloud_timestamp(last) if last else ''}
 
+def admin_connection_status():
+    """Return an explicit metadata allowlist, never configuration secrets."""
+    messaging_id=PRIVATE.get('messagingChannelId') or PUBLIC_SETTINGS.get('lineMessagingChannelId','')
+    def console_url(channel_id, section):
+        ident=str(channel_id or '')
+        return 'https://developers.line.biz/console/channel/'+ident+'/'+section if re.fullmatch(r'[0-9]{5,20}',ident) else 'https://developers.line.biz/console/'
+    service_id=os.environ.get('RENDER_SERVICE_ID','')
+    render_url='https://dashboard.render.com/web/'+service_id+'/env' if re.fullmatch(r'srv-[a-z0-9]{10,40}',service_id) else 'https://dashboard.render.com/'
+    values=cloud_settings()
+    return {
+        'cloudDeployment':CLOUD_DEPLOYMENT,
+        'localSetupEnabled':LOCAL_SETUP_ENABLED,
+        'renderSettingsUrl':render_url,
+        'line':{'oa':OA,'loginChannelId':str(CID or ''),'messagingChannelId':str(messaging_id or ''),'liffId':LIFF_ID,
+                'loginConfigured':bool(CID and SECRET),'messagingConfigured':bool(TOKEN and MESSAGE_SECRET and BOT_UID),
+                'callbackUrl':BASE+'/auth/callback','webhookUrl':BASE+'/api/line-webhook',
+                'loginConsoleUrl':console_url(CID,'line-login'),'messagingConsoleUrl':console_url(messaging_id,'messaging-api'),
+                'liffConsoleUrl':console_url(CID,'liff')},
+        'cloud':{**public_cloud_status(),'endpointConfigured':bool(values['googleSheetEndpoint']),'secretConfigured':bool(values['googleSheetSecret'])}
+    }
+
 def probe_text(case_id,nonce):
     return PROBE_HEADING+'\n案件編號：'+case_id+'\n服務代碼：'+nonce
 
@@ -358,6 +379,11 @@ class Handler(BaseHTTPRequestHandler):
             if not u: return self.send(401,{'error':'請先登入'})
             if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
             return self.send(200,public_cloud_status())
+        if path=='/api/admin-connection-status':
+            u=self.user()
+            if not u: return self.send(401,{'error':'請先登入'})
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            return self.send(200,admin_connection_status())
         if path in ('/setup-cloud','/api/local-cloud-config','/api/cloud-script'):
             if not self.local_setup(): return self.send(403,{'error':'設定頁只限本機使用'})
             if path=='/api/local-cloud-config':
