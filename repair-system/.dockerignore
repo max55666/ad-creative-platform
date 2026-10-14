@@ -1,0 +1,9 @@
+runtime
+__pycache__
+.git
+*.env
+.env
+*.db
+*.sqlite3
+*.zip
+backups

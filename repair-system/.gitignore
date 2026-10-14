@@ -1,0 +1,8 @@
+runtime/
+__pycache__/
+*.env
+.env
+*.db
+*.sqlite3
+*.zip
+backups/
