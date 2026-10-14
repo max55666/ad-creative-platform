@@ -5,7 +5,7 @@ WORKDIR /app
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py line_support.py cloud_support.py production.py cloud_start.py cloud_bootstrap.py database_tools.py ./
+COPY server.py line_support.py cloud_support.py dispatch_cards.py dispatch_workflow.py production.py cloud_start.py cloud_bootstrap.py database_tools.py ./
 COPY index.html line-client.js settings.json ./
 COPY assets/return-items.png ./assets/return-items.png
 EXPOSE 10000

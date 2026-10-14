@@ -5,6 +5,7 @@ from http.cookies import SimpleCookie
 from contextlib import contextmanager, closing
 from line_support import load_private_config, verify_id_token, validate_webhook_signature, inspect_bot, get_profile, send_push, send_reply, get_webhook_endpoint, set_webhook_endpoint, get_group_summary, send_group_text
 from cloud_support import build_payload, init_queue, validate_endpoint, validate_secret, format_sheet_phone, PRIMARY_SHEET_ID, PICKUP_SHEET_ID, PICKUP_SHEET_GID
+from dispatch_workflow import DispatchWorkflow, init_tables as init_dispatch_workflow, cancel_for_group as cancel_dispatch_workflow
 
 ROOT = Path(__file__).parent
 CLOUD_DEPLOYMENT = os.environ.get('REPAIR_DEPLOYMENT','').strip().lower()=='cloud'
@@ -55,6 +56,7 @@ PICKUP_NOTIFICATION_RETRY_SECONDS = 23*3600
 PICKUP_DISPATCH_PATTERN = re.compile(r'(R[0-9]{8}-[0-9]{4,})\s*已派車\Z')
 PICKUP_DISPATCH_VERIFIED_FINGERPRINT = ''
 PICKUP_DISPATCH_VERIFY_NEXT = 0
+PICKUP_DISPATCH_LOCK = threading.Lock()
 SERVICE_STARTED = False
 SERVICE_LOCK = threading.Lock()
 @contextmanager
@@ -115,6 +117,9 @@ def init_db():
         c.execute('UPDATE pickup_dispatch_outbox SET event_stamp=CAST(created*1000 AS INTEGER) WHERE event_stamp=0')
         c.execute('''INSERT OR IGNORE INTO pickup_dispatch_events(event_id,case_id,event_stamp)
             SELECT command_id,case_id,event_stamp FROM pickup_dispatch_outbox''')
+        if 'result_action' not in [row['name'] for row in c.execute('PRAGMA table_info(pickup_dispatch_outbox)')]:
+            c.execute('ALTER TABLE pickup_dispatch_outbox ADD COLUMN result_action TEXT NOT NULL DEFAULT ""')
+        init_dispatch_workflow(c)
 init_db()
 
 def pickup_notification_available():
@@ -133,6 +138,7 @@ def cancel_pickup_notifications(c,group_id=None,reason='group_changed'):
     args=(reason,group_id) if group_id else (reason,)
     c.execute("UPDATE pickup_notification_outbox SET state='cancelled',last_error=? WHERE state IN ('waiting_sheet','pending','failed','working','needs_review')"+condition,args)
     c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error=? WHERE state IN ('pending','failed','working')"+condition,args)
+    cancel_dispatch_workflow(c,group_id)
 
 def observe_pickup_group(event):
     """Called only after raw webhook signature and bot destination verification."""
@@ -342,7 +348,7 @@ def enqueue_pickup_dispatch(event):
             inserted=c.execute('''INSERT INTO pickup_dispatch_outbox(case_id,group_id,command_id,created,event_stamp)
                 VALUES(?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET group_id=excluded.group_id,
                 command_id=excluded.command_id,created=excluded.created,event_stamp=excluded.event_stamp,
-                state='pending',attempts=0,next_attempt=0,last_error='',synced_at='' ''',
+                state='pending',attempts=0,next_attempt=0,last_error='',synced_at='',result_action='' ''',
                 (case_id,group['group_id'],command_id,time.time(),stamp)).rowcount
     if inserted: CLOUD_WAKE.set()
     return bool(inserted)
@@ -358,16 +364,19 @@ def pickup_dispatch_update(endpoint,secret,sheet_id,dispatch):
     return update_pickup_dispatch(endpoint,secret,sheet_id,dispatch)
 
 
-def pickup_dispatch_process_once():
+def pickup_dispatch_process_once(case_id=None):
     """Durable, idempotent existing-row update; never send LINE or change cases."""
     global PICKUP_DISPATCH_VERIFIED_FINGERPRINT,PICKUP_DISPATCH_VERIFY_NEXT
     if not pickup_dispatch_available(): return {'processed':False,'state':'not_available'}
+    case_filter=' AND case_id=?' if case_id else ''
+    query_args=(time.time(),case_id) if case_id else (time.time(),)
     # Binding and membership cannot change while this immutable command is sent.
     with PICKUP_NOTIFICATION_LOCK:
-        with CLOUD_LOCK:
+        with PICKUP_DISPATCH_LOCK:
             stamp=time.time(); values=cloud_settings()
+            query_args=(stamp,case_id) if case_id else (stamp,)
             with connect() as c:
-                row=c.execute("SELECT * FROM pickup_dispatch_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=? ORDER BY next_attempt,case_id LIMIT 1",(stamp,)).fetchone()
+                row=c.execute("SELECT * FROM pickup_dispatch_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=?"+case_filter+" ORDER BY next_attempt,case_id LIMIT 1",query_args).fetchone()
                 if not row: return {'processed':False,'state':'idle'}
                 group=selected_pickup_group(c)
                 if not group or not group['active'] or row['group_id']!=group['group_id']:
@@ -389,7 +398,7 @@ def pickup_dispatch_process_once():
                 PICKUP_DISPATCH_VERIFIED_FINGERPRINT=fingerprint; PICKUP_DISPATCH_VERIFY_NEXT=0
             with connect() as c:
                 c.execute('BEGIN IMMEDIATE')
-                row=c.execute("SELECT * FROM pickup_dispatch_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=? ORDER BY next_attempt,case_id LIMIT 1",(stamp,)).fetchone()
+                row=c.execute("SELECT * FROM pickup_dispatch_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=?"+case_filter+" ORDER BY next_attempt,case_id LIMIT 1",query_args).fetchone()
                 if not row: return {'processed':False,'state':'idle'}
                 # A provider check happens outside a DB transaction; re-read the
                 # saved case before claiming, without rewriting any case fields.
@@ -406,10 +415,11 @@ def pickup_dispatch_process_once():
             except Exception: synced=False
             finished=time.time(); state='completed' if synced else 'failed'
             with connect() as c:
-                c.execute('''UPDATE pickup_dispatch_outbox SET state=?,next_attempt=?,last_error=?,synced_at=?
+                c.execute('''UPDATE pickup_dispatch_outbox SET state=?,next_attempt=?,last_error=?,synced_at=?,result_action=?
                     WHERE case_id=? AND command_id=? AND state='working' ''',
                     (state,0 if synced else finished+min(3600,30*2**min(attempts-1,7)),
-                     '' if synced else 'pickup_dispatch_failed',cloud_timestamp(finished) if synced else '',job['case_id'],job['command_id']))
+                     '' if synced else 'pickup_dispatch_failed',cloud_timestamp(finished) if synced else '',
+                     result.get('action','') if synced and result.get('action') in ('updated','unchanged') else '',job['case_id'],job['command_id']))
             return {'processed':True,'state':state}
 
 
@@ -718,7 +728,8 @@ def public_cloud_status():
                 'verified':bool(PICKUP_VERIFIED_FINGERPRINT and PICKUP_VERIFIED_FINGERPRINT==cloud_fingerprint(values)),
                 'pending':pickup_pending,'failed':pickup_failed,'lastSynced':cloud_timestamp(pickup_last) if pickup_last else '',
                 'sheetUrl':'https://docs.google.com/spreadsheets/d/'+PICKUP_SHEET_ID+'/edit#gid='+str(PICKUP_SHEET_GID)},
-            'pickupNotificationAvailable':pickup_notification_available(),'pickupDispatchAvailable':pickup_dispatch_available()}
+            'pickupNotificationAvailable':pickup_notification_available(),'pickupDispatchAvailable':pickup_dispatch_available(),
+            'dispatchWorkflowAvailable':pickup_dispatch_available()}
 
 def admin_connection_status():
     """Return an explicit metadata allowlist, never configuration secrets."""
@@ -873,6 +884,11 @@ class Handler(BaseHTTPRequestHandler):
             if not u: return self.send(401,{'error':'請先登入'})
             if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
             return self.send(200,pickup_dispatch_status())
+        if path=='/api/dispatch-workflow-status':
+            u=self.user()
+            if not u: return self.send(401,{'error':'請先登入'})
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            return self.send(200,WORKFLOW.status())
         if path=='/api/admin-connection-status':
             u=self.user()
             if not u: return self.send(401,{'error':'請先登入'})
@@ -1081,6 +1097,17 @@ class Handler(BaseHTTPRequestHandler):
             if not pickup_dispatch_available(): return self.send(503,{'error':'派車指令同步尚未設定'})
             count=retry_pickup_dispatches()
             return self.send(200,{'ok':True,'queued':count,**pickup_dispatch_status()})
+        if path in ('/api/dispatch-workflow-settings','/api/dispatch-workflow-menu'):
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            try:
+                if path.endswith('settings'):
+                    if set(data)!={'dailyEnabled'} or type(data['dailyEnabled']) is not bool: raise ValueError('invalid_setting')
+                    WORKFLOW.configure(data['dailyEnabled'])
+                else:
+                    if set(data)!={'requestId'}: raise ValueError('invalid_request')
+                    WORKFLOW.menu_push(data['requestId'])
+            except ValueError: return self.send(400,{'error':'請確認群組連線及設定格式'})
+            return self.send(200,{'ok':True,**WORKFLOW.status()})
         if path=='/api/line-handshake':
             if DEMO or not MESSAGE_SECRET or not BOT_UID: return self.send(503,{'error':'官方 LINE 連線確認尚未設定'})
             case_id=data.get('caseId')
@@ -1198,7 +1225,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(source,dict): continue
             if source.get('type')=='group':
                 observe_pickup_group(event)
-                enqueue_pickup_dispatch(event)
+                if not WORKFLOW.enqueue(event): enqueue_pickup_dispatch(event)
                 continue
             if not isinstance(message,dict): continue
             if event.get('type')!='message' or source.get('type')!='user' or message.get('type')!='text': continue
@@ -1318,6 +1345,8 @@ def validate_service_config():
         except OSError: pass
         raise ValueError('維修資料目錄無法寫入，尚未開放服務。') from None
 
+WORKFLOW = DispatchWorkflow(globals())
+
 def start_service():
     """Initialize once per Python process; imports never start network/worker IO."""
     global SERVICE_STARTED,BOT_UID
@@ -1328,6 +1357,7 @@ def start_service():
             try: BOT_UID=inspect_bot(TOKEN,OA)['userId']
             except (ValueError,KeyError): raise ValueError('無法驗證客服 LINE 帳號，尚未開放服務。') from None
         start_cloud_worker()
+        WORKFLOW.start()
         SERVICE_STARTED=True
 
 if __name__=='__main__':

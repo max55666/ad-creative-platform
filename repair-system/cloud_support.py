@@ -286,6 +286,54 @@ def update_pickup_dispatch(endpoint, secret, sheet_id, dispatch, opener=None):
     return _send(endpoint, secret, sheet_id, 'updatePickupDispatch', dispatch, opener)
 
 
+def read_pickup_dispatch(endpoint, secret, sheet_id, case_ids, opener=None):
+    """Read only enrolled case rows from the fixed dispatch sheet, never all rows."""
+    failure = {'state': 'failed', 'error': '派車名單暫時無法查詢，請稍後再試'}
+    fields = {'date': 64, 'name': 200, 'phone': 40, 'address': 1000,
+              'model': 120, 'status': 120}
+    try:
+        validate_endpoint(endpoint)
+        validate_secret(secret)
+        if (sheet_id != PRIMARY_SHEET_ID or not isinstance(case_ids, list)
+                or len(case_ids) > 1000 or any(not isinstance(ident, str)
+                    or len(ident) > 80 or not re.fullmatch(r'R[0-9]{8}-[0-9]{4,}', ident)
+                    for ident in case_ids) or len(set(case_ids)) != len(case_ids)):
+            return failure.copy()
+        payload = {'operation': 'readPickupDispatch', 'secret': secret,
+                   'sheetId': sheet_id, 'query': {'caseIds': case_ids}}
+        body = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        if len(body) > 120000:
+            return failure.copy()
+        request = urllib.request.Request(endpoint, data=body, method='POST', headers={
+            'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json'})
+        sender = opener or urllib.request.build_opener(GoogleContentRedirect())
+        with sender.open(request, timeout=25) as response:
+            raw = response.read(8 * 1024 * 1024 + 1)
+            if response.status != 200 or len(raw) > 8 * 1024 * 1024:
+                return failure.copy()
+            result = json.loads(raw)
+        if (not isinstance(result, dict) or result.get('ok') is not True
+                or result.get('sheetId') != sheet_id
+                or result.get('schema') != 'petpivot-dispatch-list-v1'
+                or result.get('pickupSheetId') != PICKUP_SHEET_ID
+                or type(result.get('pickupSheetGid')) is not int
+                or result.get('pickupSheetGid') != PICKUP_SHEET_GID
+                or not isinstance(result.get('cases'), list)
+                or len(result['cases']) != len(case_ids)):
+            return failure.copy()
+        expected_keys = {'caseId', *fields}
+        for ident, record in zip(case_ids, result['cases']):
+            if (not isinstance(record, dict) or set(record) != expected_keys
+                    or record['caseId'] != ident
+                    or any(not isinstance(record.get(key), str)
+                           or len(record[key].encode('utf-16-le')) // 2 > limit
+                           for key, limit in fields.items())):
+                return failure.copy()
+        return {'state': 'synced', 'cases': result['cases']}
+    except Exception:
+        return failure.copy()
+
+
 def upsert_case(endpoint, secret, record, sheet_id=None, opener=None):
     """Compatibility wrapper; the configured sheet id is required for binding."""
     return upsert(endpoint, secret, sheet_id, record, opener)

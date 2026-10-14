@@ -313,6 +313,209 @@ def send_group_text(token, group_id, text, retry_key):
                                   retryable=True, ambiguous=True)
 
 
+def _message_units(value, maximum, nonempty=False):
+    if (not isinstance(value, str) or nonempty and not value.strip()
+            or len(value.encode("utf-16-le")) // 2 > maximum
+            or any(ord(char) < 32 and char not in "\r\n\t" for char in value)):
+        raise ValueError("invalid message")
+
+
+def _validate_flex_action(action):
+    if not isinstance(action, dict):
+        raise ValueError("invalid action")
+    _message_units(action.get("label"), 40, True)
+    kind = action.get("type")
+    if kind == "postback":
+        if not {"type", "label", "data"} <= set(action) or not set(action) <= {"type", "label", "data", "displayText"}:
+            raise ValueError("invalid action")
+        _message_units(action.get("data"), 300, True)
+        if "displayText" in action:
+            _message_units(action["displayText"], 300, True)
+    elif kind == "clipboard":
+        if set(action) != {"type", "label", "clipboardText"}:
+            raise ValueError("invalid action")
+        _message_units(action.get("clipboardText"), 1000, True)
+    elif kind == "uri":
+        if set(action) != {"type", "label", "uri"}:
+            raise ValueError("invalid action")
+        uri = action.get("uri")
+        _message_units(uri, 1000, True)
+        if any(char.isspace() for char in uri):
+            raise ValueError("invalid action")
+        parsed = urllib.parse.urlsplit(uri)
+        if parsed.scheme == "tel":
+            if not re.fullmatch(r"tel:\+?[0-9]{8,15}", uri):
+                raise ValueError("invalid action")
+        elif parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("invalid action")
+    else:
+        raise ValueError("invalid action")
+
+
+def _validate_flex_component(component, depth=0):
+    if not isinstance(component, dict) or depth > 16:
+        raise ValueError("invalid component")
+    common = {"type", "margin", "flex", "position", "offsetTop", "offsetBottom", "offsetStart", "offsetEnd"}
+    kind = component.get("type")
+    if kind == "box":
+        allowed = common | {"layout", "contents", "spacing", "paddingAll", "paddingTop", "paddingBottom",
+                            "paddingStart", "paddingEnd", "backgroundColor", "borderColor", "borderWidth",
+                            "cornerRadius", "width", "height", "justifyContent", "alignItems", "action"}
+        if (component.get("layout") not in ("vertical", "horizontal", "baseline")
+                or not isinstance(component.get("contents"), list) or not 1 <= len(component["contents"]) <= 50):
+            raise ValueError("invalid component")
+        for child in component["contents"]:
+            _validate_flex_component(child, depth + 1)
+    elif kind == "text":
+        allowed = common | {"text", "size", "color", "weight", "wrap", "align", "gravity", "maxLines",
+                            "lineSpacing", "decoration", "style", "action"}
+        _message_units(component.get("text"), 2000, True)
+        if "wrap" in component and type(component["wrap"]) is not bool:
+            raise ValueError("invalid component")
+    elif kind == "button":
+        allowed = common | {"action", "style", "height", "color", "gravity"}
+        if component.get("style", "link") not in ("link", "primary", "secondary"):
+            raise ValueError("invalid component")
+        if "action" not in component:
+            raise ValueError("invalid component")
+    elif kind == "separator":
+        allowed = {"type", "margin", "color"}
+    else:
+        raise ValueError("invalid component")
+    if not set(component) <= allowed:
+        raise ValueError("invalid component")
+    if "action" in component:
+        _validate_flex_action(component["action"])
+    for key, value in component.items():
+        if key in ("contents", "action"):
+            continue
+        if isinstance(value, str):
+            _message_units(value, 2000 if key == "text" else 1000)
+        elif type(value) is bool:
+            if key != "wrap":
+                raise ValueError("invalid component")
+        elif type(value) in (int, float):
+            if not math.isfinite(value) or not 0 <= value <= 1000:
+                raise ValueError("invalid component")
+        else:
+            raise ValueError("invalid component")
+
+
+def _validate_flex_container(container):
+    if not isinstance(container, dict):
+        raise ValueError("invalid container")
+    kind = container.get("type")
+    if kind == "carousel":
+        if (set(container) != {"type", "contents"} or not isinstance(container.get("contents"), list)
+                or not 1 <= len(container["contents"]) <= 12):
+            raise ValueError("invalid container")
+        sizes = set()
+        for bubble in container["contents"]:
+            if not isinstance(bubble, dict) or bubble.get("type") != "bubble":
+                raise ValueError("invalid container")
+            _validate_flex_container(bubble)
+            sizes.add(bubble.get("size", "mega"))
+        if len(sizes) != 1:
+            raise ValueError("invalid container")
+        limit = 50000
+    elif kind == "bubble":
+        if (not set(container) <= {"type", "size", "direction", "header", "body", "footer"}
+                or not any(key in container for key in ("header", "body", "footer"))
+                or container.get("size", "mega") not in ("nano", "micro", "kilo", "mega", "giga")
+                or container.get("direction", "ltr") not in ("ltr", "rtl")):
+            raise ValueError("invalid container")
+        for key in ("header", "body", "footer"):
+            if key in container:
+                if not isinstance(container[key], dict) or container[key].get("type") != "box":
+                    raise ValueError("invalid container")
+                _validate_flex_component(container[key])
+        limit = 30000
+    else:
+        raise ValueError("invalid container")
+    if len(json.dumps(container, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")) > limit:
+        raise ValueError("invalid container")
+
+
+def _group_messages_bytes(group_id, messages):
+    """Local conservative schema for text and standard dispatch Flex messages."""
+    if not isinstance(messages, list) or not 1 <= len(messages) <= 5:
+        raise ValueError("invalid messages")
+    for message in messages:
+        if not isinstance(message, dict):
+            raise ValueError("invalid message")
+        if message.get("type") == "text":
+            if set(message) != {"type", "text"}:
+                raise ValueError("invalid message")
+            _message_units(message.get("text"), 5000, True)
+        elif message.get("type") == "flex":
+            if set(message) != {"type", "altText", "contents"}:
+                raise ValueError("invalid message")
+            _message_units(message.get("altText"), 1500, True)
+            _validate_flex_container(message.get("contents"))
+        else:
+            raise ValueError("invalid message")
+    raw = json.dumps({"to": group_id, "messages": messages}, ensure_ascii=False,
+                     separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(raw) > 200000:
+        raise ValueError("invalid messages")
+    return raw
+
+
+def send_group_messages(token, group_id, messages, retry_key, opener=None):
+    """Explicitly push 1..5 bounded text/Flex messages with one saved retry key.
+
+    Standard dispatch Flex containers/actions are locally checked. Return the
+    same sanitized accepted/failed + retryable/ambiguous contract as group text.
+    The caller owns the immutable payload and 23-hour retry window. An optional
+    callable opener(request, timeout=15) supports offline tests; no automatic
+    retry, log, group discovery or UUID generation happens here.
+    """
+    try:
+        normalized_key = str(uuid.UUID(str(retry_key)))
+    except (ValueError, TypeError, AttributeError):
+        return _group_push_result("failed", None, error="invalid_retry_key")
+    if not _valid_group_token(token):
+        return _group_push_result("failed", normalized_key, error="invalid_token")
+    if not isinstance(group_id, str) or not _GROUP_ID.fullmatch(group_id):
+        return _group_push_result("failed", normalized_key, error="invalid_recipient")
+    if opener is not None and not callable(opener):
+        return _group_push_result("failed", normalized_key, error="invalid_opener")
+    try:
+        raw = _group_messages_bytes(group_id, messages)
+    except (ValueError, TypeError, UnicodeError, OverflowError, RecursionError):
+        return _group_push_result("failed", normalized_key, error="invalid_payload")
+    try:
+        request = urllib.request.Request(
+            "https://api.line.me/v2/bot/message/push", data=raw,
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + token,
+                     "X-Line-Retry-Key": normalized_key}, method="POST",
+        )
+        with (opener or urllib.request.urlopen)(request, timeout=_TIMEOUT) as response:
+            status = response.getcode()
+            request_id = _safe_request_id(response.headers, "x-line-request-id")
+            accepted_id = _safe_request_id(response.headers, "x-line-accepted-request-id")
+        if status == 200:
+            return _group_push_result("accepted", normalized_key, status, request_id)
+        if status == 409 and accepted_id:
+            return _group_push_result("accepted", normalized_key, status, accepted_id)
+        return _group_push_result("failed", normalized_key, status, request_id, "unexpected_status",
+                                  retryable=status == 429 or 500 <= status < 600,
+                                  ambiguous=status == 409 or 500 <= status < 600 or not 400 <= status < 500)
+    except urllib.error.HTTPError as error:
+        status = error.code
+        accepted_id = _safe_request_id(error.headers, "x-line-accepted-request-id")
+        error.close()
+        if status == 409 and accepted_id:
+            return _group_push_result("accepted", normalized_key, status, accepted_id)
+        return _group_push_result("failed", normalized_key, status, error="http_error",
+                                  retryable=status == 429 or 500 <= status < 600,
+                                  ambiguous=status == 409 or 500 <= status < 600)
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError,
+            UnicodeError, TypeError):
+        return _group_push_result("failed", normalized_key, error="network_error",
+                                  retryable=True, ambiguous=True)
+
+
 def submission_confirmation(case_id, case_data):
     """The initial receipt, using only the server's saved application fields."""
     def one_line(value, fallback):
