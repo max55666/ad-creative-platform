@@ -276,7 +276,10 @@ def notify(case):
             return 'LINE API 已接受通知（未確認送達）'
         if not prior['created'] or time.time()-prior['created']>=86400:
             return '通知重試期限已過，請由客服另行聯繫'
-    result=send_push(TOKEN,case['user_id'],case['id'],case['status'],retry_key)
+    case_data=case.get('data')
+    if isinstance(case_data,str): case_data=json.loads(case_data)
+    confirmation_data=case_data if case['status']=='已申請' and len(history)<=1 and isinstance(case_data,dict) else None
+    result=send_push(TOKEN,case['user_id'],case['id'],case['status'],retry_key,confirmation_data=confirmation_data)
     with connect() as c: c.execute('UPDATE line_outbox SET result=? WHERE message_key=?',(json.dumps(result),message_key))
     if result['state']=='accepted': return 'LINE API 已接受通知（未確認送達）'
     return '通知失敗：'+str(result.get('error') or '無法傳送')+'；可由後台重送'
@@ -602,7 +605,7 @@ class Handler(BaseHTTPRequestHandler):
                 history=json.dumps([{'time':now,'status':'已申請','by':'客戶'}],ensure_ascii=False)
                 c.execute('INSERT INTO cases(id,user_id,request_id,data,status,created,history,line_display_name) VALUES(?,?,?,?,?,?,?,?)',(ident,u['id'],rid,json.dumps(clean,ensure_ascii=False),'已申請',now,history,trusted_display_name(u.get('displayName'))))
                 enqueue_cloud_case(c,ident)
-            result=notify({'user_id':u['id'],'id':ident,'status':'已申請'})
+            result=notify({'user_id':u['id'],'id':ident,'status':'已申請','data':clean,'history':history})
             with connect() as c:
                 c.execute('UPDATE cases SET notification=? WHERE id=?',(result,ident)); enqueue_cloud_case(c,ident); row=c.execute('SELECT * FROM cases WHERE id=?',(ident,)).fetchone()
             return self.send(201,{'case':self.case_dict(row)})

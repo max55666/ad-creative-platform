@@ -207,7 +207,19 @@ def _safe_request_id(headers, name):
     return None
 
 
-def send_push(token, user_id, case_id, status, retry_key):
+def submission_confirmation(case_id, case_data):
+    """The initial receipt, using only the server's saved application fields."""
+    def one_line(value, fallback):
+        return re.sub(r'[\r\n]+', ' ', str(value or fallback)).strip() or fallback
+    applicant = one_line(case_data.get('name'), '未提供')
+    order = ('無訂單編號／不記得了（保固外付費維修）'
+             if case_data.get('orderChoice') == 'missing'
+             else one_line(case_data.get('order'), '未提供'))
+    return (f'【維修申請確認】\n案件編號：{case_id}\n申請人：{applicant}\n訂單編號：{order}'
+            '\n\n如需補充資訊，請直接在此聊天室留言並附上案件編號。')
+
+
+def send_push(token, user_id, case_id, status, retry_key, confirmation_data=None):
     """Send one explicit OA-to-customer notification with an idempotent retry key.
 
     Returns {state, httpStatus, requestId, retryKey, error}. `accepted` means API
@@ -229,8 +241,14 @@ def send_push(token, user_id, case_id, status, retry_key):
         or any(char in case_id + status for char in "\r\n")
     ):
         return _result("failed", normalized_key, error="invalid_payload")
-    title = "維修申請已受理" if status == "已申請" else "維修進度已更新"
-    text = f"{title}\n維修編號：{case_id}\n目前狀態：{status}\n請由維修申請頁查看案件。"
+    if confirmation_data is not None:
+        if status != '已申請' or not isinstance(confirmation_data, dict):
+            return _result("failed", normalized_key, error="invalid_payload")
+        text = submission_confirmation(case_id, confirmation_data)
+    else:
+        text = f"維修進度已更新\n維修編號：{case_id}\n目前狀態：{status}\n請由維修申請頁查看案件。"
+    if len(text) > 5000:
+        return _result("failed", normalized_key, error="invalid_payload")
     payload = {"to": user_id, "messages": [{"type": "text", "text": text}]}
     request = urllib.request.Request(
         "https://api.line.me/v2/bot/message/push",
