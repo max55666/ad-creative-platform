@@ -106,11 +106,21 @@ def _address(data, prefix, label):
 
 def validate_case_addresses(data, shipping):
     """Return only trusted address fields, rejecting unsupported pickup locations."""
+    same_as_return = data.get('pickupSameAsReturn', False)
+    if not isinstance(same_as_return, bool):
+        raise ValueError('取件地址是否與寄回地址相同的選項格式錯誤，請重新選擇')
     result, return_location = _address(data, 'return', '寄回地址')
     if shipping != PICKUP_SHIPPING:
         result['pickupAddress'] = ''
         return result
-    pickup, pickup_location = _address(data, 'pickup', '取件地址')
+    if same_as_return:
+        # Copy trusted normalized fields only. Client pickup values are irrelevant.
+        pickup = {'pickup' + part: result['return' + part]
+                  for part in ('City', 'District', 'Street', 'Address')
+                  if 'return' + part in result}
+        pickup_location = return_location
+    else:
+        pickup, pickup_location = _address(data, 'pickup', '取件地址')
     for city, district in (return_location, pickup_location):
         if is_offshore(city, district):
             raise ValueError(OFFSHORE_PICKUP_ERROR)

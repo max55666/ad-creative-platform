@@ -154,6 +154,7 @@ button,.button{min-height:48px;line-height:1.5;touch-action:manipulation}
 .address-grid .street-field{grid-column:1/-1}
 .address-fields .muted{margin:10px 0 0}
 select option:disabled{color:#87938d;background:#f0f2f0}
+.pickup-same-summary{overflow-wrap:anywhere}.pickup-same-summary p{margin-bottom:0}.pickup-address-title{margin:20px 0 12px}
 .pickup-limit{border-left-color:#b68140;background:#fff5e7}
 .customer-page .hero-payment strong{display:block;margin-bottom:4px}
 @media(max-width:600px){
@@ -194,6 +195,7 @@ function addressFields(prefix,title){
 function syncAddress(prefix){
   const f=document.getElementById('repairForm');
   f.elements[prefix+'Address'].value=f.elements[prefix+'City'].value+f.elements[prefix+'District'].value+f.elements[prefix+'Street'].value.trim();
+  if(prefix==='return')pickupSameChange();
 }
 function addressCityChange(prefix){
   const f=document.getElementById('repairForm'),city=f.elements[prefix+'City'].value,district=f.elements[prefix+'District'];
@@ -220,22 +222,45 @@ function orderChange(){const f=document.getElementById('repairForm');const choic
 function validateOrder(){const f=document.getElementById('repairForm');const input=f.elements.order;input.setCustomValidity(!input.disabled&&input.value&&!input.value.trim()?'請填寫有效的訂單編號，或選擇無訂單編號／不記得了。':'')}
 function orderChoiceLabel(c){return c.data.orderChoice==='provided'?'有訂單編號':c.data.orderChoice==='missing'?'無訂單編號／不記得了':'未記錄（舊案件）'}
 function repairPolicyLabel(c){return c.data.repairPolicy||'待客服確認（舊案件）'}
-function renderForm(){app.innerHTML+='<button class="outline wide" onclick="saveDraft();step=1;render()" style="margin-bottom:18px">← 返回查看送修規範</button><form id="repairForm"><section class="card"><div class="section-label">STEP 02</div><h2>聯絡與商品資料</h2><p class="muted">請填寫可以聯繫到你的資料，以便安排後續作業。</p><div class="grid">'+field('姓名','name',true)+field('聯絡電話','phone',true,'tel')+''+addressFields('return','維修完成後寄回地址')+''+field('電子郵件','email',false,'email',true)+field('商品型號','model',true)+'<div>'+field('商品序號','serial')+'<p id="serialHint" class="muted" style="margin:6px 0 0">請填寫機身側邊SN序號碼</p></div>'+field('購買通路','purchase')+orderFields()+'</div></section><section class="card"><h3 class="form-section-title">寄送方式</h3><label class="field">寄送方式 <span class="required">*</span><select name="shipping" required aria-describedby="pickupServiceHint" onchange="shippingChange()"><option value="自行寄送">自行寄送</option><option id="pickupShippingOption" value="由客服派遣物流回收">客服物流回收（NT$350）</option><option value="親自送回">親自送回</option></select></label><p id="pickupServiceHint" class="muted" role="status" aria-live="polite"></p><div id="pickupNotice" class="notice hidden">由客服派遣物流回收需收取運費 NT$350；即使核定免維修費，仍需支付回收運費。客服核定金額後會透過 LINE 提供付款連結，付款核對成功後才安排回收。</div><div id="pickup" class="hidden">'+addressFields('pickup','到府取件地址')+'</div><div id="dropoffNotice" class="notice hidden"><strong>親自送回注意事項</strong><br>親送需要裝箱，由管理室收取；裸機送回管理室會拒收。</div></section><section class="card"><h3>問題說明</h3><p class="muted">資訊越完整，越有助於判斷。</p><label class="field">機器目前的異常情況 <span class="required">*</span><textarea name="problem" required maxlength="5000" style="min-height:155px" placeholder="例如：何時開始發生、燈號或聲音、已嘗試哪些排除方式等">'+esc(draft.problem||'')+'</textarea></label><label class="field" style="margin-top:16px">其他補充說明<textarea name="extra" maxlength="5000">'+esc(draft.extra||'')+'</textarea></label></section><section class="card"><h3>送出前最終確認</h3><div class="notice"><strong>填表後的費用與付款流程</strong><ol class="payment-flow"><li><strong>客服核定費用</strong><span>如需檢測費、維修費或回收運費，客服會先確認金額。</span></li><li><strong>收到 LINE 付款連結</strong><span>請依通知金額完成付款。</span></li><li><strong>核對成功，再進行檢修</strong><span>付款核對成功後，才安排後續檢測與維修。</span></li></ol><p>若客服核定免付款，請依客服確認的送修方式辦理。</p></div><p class="muted">請依目前實際準備狀態再次確認。</p>'+['寄回箱內只有主機本體與電源線，未放入貓砂倉、支撐腳或集便盒。','主機已完成基本清潔，沒有大量貓砂、尿液或其他排泄物殘留。','我會使用牢固紙箱將產品妥善包好。','我已了解寄送方式與費用資訊。'].map((t,i)=>'<label class="check"><input type="checkbox" name="check'+i+'" required>'+t+'</label>').join('')+'<label class="check"><input type="checkbox" name="privacy" required>我同意本次填寫資料用於檢修聯繫及案件處理。'+(config.demo?'測試版請勿填寫真實個資。':'')+'</label></section><button id="submit" class="wide" type="submit">送出檢修申請</button><p class="footer">送出後將產生專屬維修編號。</p></form>';document.querySelector('[name=shipping]').value=draft.shipping==='客服安排收件'?'由客服派遣物流回收':draft.shipping||'自行寄送';syncAddress('return');syncAddress('pickup');updatePickupAvailability();orderChange();document.getElementById('repairForm').onsubmit=e=>{e.preventDefault();action(submit)}}
+function renderForm(){app.innerHTML+='<button class="outline wide" onclick="saveDraft();step=1;render()" style="margin-bottom:18px">← 返回查看送修規範</button><form id="repairForm"><section class="card"><div class="section-label">STEP 02</div><h2>聯絡與商品資料</h2><p class="muted">請填寫可以聯繫到你的資料，以便安排後續作業。</p><div class="grid">'+field('姓名','name',true)+field('聯絡電話','phone',true,'tel')+''+addressFields('return','維修完成後寄回地址')+''+field('電子郵件','email',false,'email',true)+field('商品型號','model',true)+'<div>'+field('商品序號','serial')+'<p id="serialHint" class="muted" style="margin:6px 0 0">請填寫機身側邊SN序號碼</p></div>'+field('購買通路','purchase')+orderFields()+'</div></section><section class="card"><h3 class="form-section-title">寄送方式</h3><label class="field">寄送方式 <span class="required">*</span><select name="shipping" required aria-describedby="pickupServiceHint" onchange="shippingChange()"><option value="自行寄送">自行寄送</option><option id="pickupShippingOption" value="由客服派遣物流回收">客服物流回收（NT$350）</option><option value="親自送回">親自送回</option></select></label><p id="pickupServiceHint" class="muted" role="status" aria-live="polite"></p><div id="pickupNotice" class="notice hidden">由客服派遣物流回收需收取運費 NT$350；即使核定免維修費，仍需支付回收運費。客服核定金額後會透過 LINE 提供付款連結，付款核對成功後才安排回收。</div><div id="pickup" class="hidden"><h4 class="pickup-address-title">到府取件地址 <span class="required">*</span></h4><label class="check"><input type="checkbox" name="pickupSameAsReturn" onchange="pickupSameChange()" aria-controls="pickupAddressFields pickupSameSummary" '+(draft.pickupSameAsReturn===true?'checked':'')+'><span>與寄回地址相同</span></label><div id="pickupSameSummary" class="notice pickup-same-summary hidden" role="status" aria-live="polite"><strong>將使用以下地址取件</strong><div id="pickupSameAddressText"></div><p class="muted">修改上方寄回地址時，取件地址也會同步更新。</p></div>'+addressFields('pickup','另外填寫取件地址')+'</div><div id="dropoffNotice" class="notice hidden"><strong>親自送回注意事項</strong><br>親送需要裝箱，由管理室收取；裸機送回管理室會拒收。</div></section><section class="card"><h3>問題說明</h3><p class="muted">資訊越完整，越有助於判斷。</p><label class="field">機器目前的異常情況 <span class="required">*</span><textarea name="problem" required maxlength="5000" style="min-height:155px" placeholder="例如：何時開始發生、燈號或聲音、已嘗試哪些排除方式等">'+esc(draft.problem||'')+'</textarea></label><label class="field" style="margin-top:16px">其他補充說明<textarea name="extra" maxlength="5000">'+esc(draft.extra||'')+'</textarea></label></section><section class="card"><h3>送出前最終確認</h3><div class="notice"><strong>填表後的費用與付款流程</strong><ol class="payment-flow"><li><strong>客服核定費用</strong><span>如需檢測費、維修費或回收運費，客服會先確認金額。</span></li><li><strong>收到 LINE 付款連結</strong><span>請依通知金額完成付款。</span></li><li><strong>核對成功，再進行檢修</strong><span>付款核對成功後，才安排後續檢測與維修。</span></li></ol><p>若客服核定免付款，請依客服確認的送修方式辦理。</p></div><p class="muted">請依目前實際準備狀態再次確認。</p>'+['寄回箱內只有主機本體與電源線，未放入貓砂倉、支撐腳或集便盒。','主機已完成基本清潔，沒有大量貓砂、尿液或其他排泄物殘留。','我會使用牢固紙箱將產品妥善包好。','我已了解寄送方式與費用資訊。'].map((t,i)=>'<label class="check"><input type="checkbox" name="check'+i+'" required>'+t+'</label>').join('')+'<label class="check"><input type="checkbox" name="privacy" required>我同意本次填寫資料用於檢修聯繫及案件處理。'+(config.demo?'測試版請勿填寫真實個資。':'')+'</label></section><button id="submit" class="wide" type="submit">送出檢修申請</button><p class="footer">送出後將產生專屬維修編號。</p></form>';document.querySelector('[name=shipping]').value=draft.shipping==='客服安排收件'?'由客服派遣物流回收':draft.shipping||'自行寄送';syncAddress('return');syncAddress('pickup');updatePickupAvailability();orderChange();document.getElementById('repairForm').onsubmit=e=>{e.preventDefault();action(submit)}}
 function shippingChange(){
   const f=document.getElementById('repairForm');
   if(document.getElementById('pickupShippingOption').disabled&&f.elements.shipping.value==='由客服派遣物流回收')f.elements.shipping.value='自行寄送';
   const yes=f.elements.shipping.value==='由客服派遣物流回收';
   document.getElementById('pickup').classList.toggle('hidden',!yes);
-  document.getElementById('pickupAddressFields').disabled=!yes;
+  f.elements.pickupSameAsReturn.disabled=!yes;
   document.getElementById('pickupNotice').classList.toggle('hidden',!yes);
   document.getElementById('dropoffNotice').classList.toggle('hidden',f.elements.shipping.value!=='親自送回');
-  syncAddress('pickup');
+  syncAddress('pickup');pickupSameChange();
+}
+
+function pickupSameChange(){
+  const f=document.getElementById('repairForm');if(!f)return;
+  const yes=f.elements.shipping.value==='由客服派遣物流回收',same=f.elements.pickupSameAsReturn.checked;
+  const fields=document.getElementById('pickupAddressFields');
+  fields.disabled=!yes||same;fields.classList.toggle('hidden',same);
+  document.getElementById('pickupSameSummary').classList.toggle('hidden',!yes||!same);
+  const complete=f.elements.returnCity.value&&f.elements.returnDistrict.value&&f.elements.returnStreet.value.trim();
+  document.getElementById('pickupSameAddressText').textContent=complete?f.elements.returnAddress.value:'請先完整填寫上方寄回地址。';
 }
 
 function shippingFeeLabel(c){return c.data.pickupFeeTwd===350?'NT$350':''}
 
-function saveDraft(){let f=document.getElementById('repairForm');if(f)draft=Object.fromEntries(new FormData(f))}
-async function submit(){syncAddress('return');syncAddress('pickup');let f=document.getElementById('repairForm');validateOrder();if(!f.reportValidity())return;let b=document.getElementById('submit');b.disabled=true;b.textContent='正在建立案件…';saveDraft();try{selected=(await api('/api/cases',{...draft,rules,checks:[0,1,2,3].map(i=>f.elements['check'+i].checked),privacy:f.elements.privacy.checked,requestId})).case;draft={};requestId=crypto.randomUUID();step=3;lineReturnState={state:config.demo?'demo':repairLine.canAutoReturn()?'sending':'saved'};render();window.scrollTo(0,0);if(lineReturnState.state==='sending')await returnSummary()}finally{if(document.contains(b)){b.disabled=false;b.textContent='送出檢修申請'}}}
+function saveDraft(){
+  const f=document.getElementById('repairForm');if(!f)return;
+  draft=Object.fromEntries(new FormData(f));
+  draft.pickupSameAsReturn=f.elements.pickupSameAsReturn.checked;
+  // Keep a separately entered address when the checkbox is toggled or rules are revisited.
+  for(const part of ['City','District','Street','Address'])draft['pickup'+part]=f.elements['pickup'+part].value;
+}
+function submissionDraft(){
+  const data={...draft},pickup=data.shipping==='由客服派遣物流回收';
+  data.pickupSameAsReturn=pickup&&draft.pickupSameAsReturn===true;
+  if(data.pickupSameAsReturn)for(const part of ['City','District','Street','Address'])data['pickup'+part]=data['return'+part];
+  if(!pickup){for(const part of ['City','District','Street'])delete data['pickup'+part];data.pickupAddress='';}
+  return data;
+}
+async function submit(){syncAddress('return');syncAddress('pickup');let f=document.getElementById('repairForm');validateOrder();if(!f.reportValidity())return;let b=document.getElementById('submit');b.disabled=true;b.textContent='正在建立案件…';saveDraft();try{selected=(await api('/api/cases',{...submissionDraft(),rules,checks:[0,1,2,3].map(i=>f.elements['check'+i].checked),privacy:f.elements.privacy.checked,requestId})).case;draft={};requestId=crypto.randomUUID();step=3;lineReturnState={state:config.demo?'demo':repairLine.canAutoReturn()?'sending':'saved'};render();window.scrollTo(0,0);if(lineReturnState.state==='sending')await returnSummary()}finally{if(document.contains(b)){b.disabled=false;b.textContent='送出檢修申請'}}}
 async function returnSummary(){if(!selected)return;const c=selected;step=3;lineReturnState={state:'sending'};render();let returned;try{returned=await repairLine.returnReference(c,summary(c))}catch(_){returned={state:'failed'}}if(step===3&&selected?.id===c.id){lineReturnState=returned;if(returned.state==='received')selected.lineSummaryReceivedAt=returned.receivedAt;render()}}
 function summary(c){return '【維修申請確認】\n案件編號：'+c.id+'\n申請人：'+String(c.data.name||'').replace(/[\r\n]+/g,' ')+'\n訂單編號：'+(c.data.orderChoice==='missing'?'無訂單編號／不記得了（保固外付費維修）':String(c.data.order||'未提供').replace(/[\r\n]+/g,' '))+'\n\n如需補充資訊，請直接在此聊天室留言並附上案件編號。'}
 function lineReturnNotice(){if(config.demo)return '測試案件已儲存。尚未傳送至官方 LINE，請勿寄送實體商品。';if(lineReturnState.state==='saved')return '案件已送出，客服會依案件資料接續處理。可到「我的維修案件」查看進度。';if(selected?.lineSummaryReceivedAt||lineReturnState.state==='received')return '客服官方 LINE 已收到申請摘要，可接續處理案件。';if(lineReturnState.state==='sending')return '案件已儲存，正在自動傳送申請摘要…';if(lineReturnState.state==='pending')return '摘要已傳送，正在等待客服收件確認。請點「確認自動回傳」再次查詢。';if(lineReturnState.state==='unconfirmed')return '案件已儲存，目前尚未確認客服收件。請確認客服 LINE 的 Webhook 已啟用，再重試自動回傳。';if(lineReturnState.state==='entry-required')return '案件已建立。目前無法自動回傳 LINE 摘要，可複製摘要傳給客服，無須重新填寫。';return '案件已儲存，申請摘要尚未確認送達。請重試自動回傳，無須重新填寫或建立案件。'}
