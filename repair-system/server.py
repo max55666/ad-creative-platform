@@ -59,6 +59,9 @@ PICKUP_DISPATCH_VERIFY_NEXT = 0
 PICKUP_DISPATCH_LOCK = threading.Lock()
 SERVICE_STARTED = False
 SERVICE_LOCK = threading.Lock()
+PAYMENTS = None
+PAYMENT_WORKFLOW = 'payment-v1'
+PAYMENT_REQUIRED_STATUSES = frozenset(('待收件','已收件','檢測中','維修中','待寄回','已寄回','已結案'))
 @contextmanager
 def connect():
     c = sqlite3.connect(DB, timeout=15)
@@ -245,6 +248,10 @@ def promote_pickup_notification(c,case_id):
     group=selected_pickup_group(c)
     row=c.execute("SELECT group_id FROM pickup_notification_outbox WHERE case_id=? AND state='waiting_sheet'",(case_id,)).fetchone()
     if not row: return
+    case=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
+    if not case or not pickup_eligible(dict(case)):
+        c.execute("UPDATE pickup_notification_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=? AND state='waiting_sheet'",(case_id,))
+        return
     if not group or not group['active'] or row['group_id']!=group['group_id']:
         c.execute("UPDATE pickup_notification_outbox SET state='cancelled',last_error='group_changed' WHERE case_id=? AND state='waiting_sheet'",(case_id,))
         return
@@ -259,6 +266,10 @@ def pickup_notification_process_once():
             c.execute('BEGIN IMMEDIATE')
             row=c.execute("SELECT * FROM pickup_notification_outbox WHERE state IN ('pending','failed','working') AND next_attempt<=? ORDER BY next_attempt,case_id LIMIT 1",(stamp,)).fetchone()
             if not row: return {'processed':False,'state':'idle'}
+            case=c.execute('SELECT * FROM cases WHERE id=?',(row['case_id'],)).fetchone()
+            if not case or not pickup_eligible(dict(case)):
+                c.execute("UPDATE pickup_notification_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=?",(row['case_id'],))
+                return {'processed':True,'state':'cancelled'}
             group=selected_pickup_group(c)
             if not group or not group['active'] or row['group_id']!=group['group_id']:
                 c.execute("UPDATE pickup_notification_outbox SET state='cancelled',last_error='group_inactive' WHERE case_id=?",(row['case_id'],))
@@ -269,6 +280,12 @@ def pickup_notification_process_once():
             if not active_pickup_group(group): return {'processed':False,'state':'group_verification_pending'}
             job=dict(row); first=job['first_attempt'] or stamp; attempts=job['attempts']+1
             c.execute("UPDATE pickup_notification_outbox SET state='working',first_attempt=?,attempts=?,next_attempt=? WHERE case_id=?",(first,attempts,stamp+90,job['case_id']))
+        # A payment/refund change can occur between selection and delivery.
+        # Never use an immutable message snapshot as payment authority.
+        if not pickup_cases_allowed([job['case_id']]):
+            with connect() as c:
+                c.execute("UPDATE pickup_notification_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=? AND state='working'",(job['case_id'],))
+            return {'processed':True,'state':'cancelled'}
         try: result=send_group_text(TOKEN,job['group_id'],job['message'],job['retry_key'])
         except Exception: result={'state':'failed','retryable':True,'ambiguous':True}
         accepted=(isinstance(result,dict) and result.get('state')=='accepted'
@@ -409,6 +426,10 @@ def pickup_dispatch_process_once(case_id=None):
                 job=dict(row); attempts=job['attempts']+1
                 c.execute("UPDATE pickup_dispatch_outbox SET state='working',attempts=?,next_attempt=? WHERE case_id=?",(attempts,stamp+90,job['case_id']))
             dispatch={'caseId':job['case_id'],'commandId':job['command_id']}
+            if not pickup_cases_allowed([job['case_id']]):
+                with connect() as c:
+                    c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=? AND command_id=? AND state='working'",(job['case_id'],job['command_id']))
+                return {'processed':True,'state':'cancelled'}
             try:
                 result=pickup_dispatch_update(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'],dispatch)
                 synced=isinstance(result,dict) and result.get('state')=='synced'
@@ -519,12 +540,93 @@ def pickup_health():
         return {'ok':True,'enabled':True,'verified':True,'scope':'new_cases_only',
                 'sheetUrl':'https://docs.google.com/spreadsheets/d/'+PICKUP_SHEET_ID+'/edit#gid='+str(PICKUP_SHEET_GID)}
 
-def pickup_eligible(case):
-    """Only exact live pickup submissions from verified LINE identity rows."""
+def payment_case_data(case):
+    """Read only server-owned case rows; malformed data cannot bypass a gate."""
+    try:
+        data=case.get('data',{})
+        if isinstance(data,str): data=json.loads(data)
+        return data if isinstance(data,dict) else None
+    except (ValueError,TypeError,AttributeError): return None
+
+def payment_json_object(pairs):
+    value={}
+    for key,item in pairs:
+        if key in value: raise ValueError('duplicate_payment_field')
+        value[key]=item
+    return value
+
+def payment_json_constant(value):
+    raise ValueError('non_finite_payment_field')
+
+def payment_case_allowed(case):
+    data=payment_case_data(case)
+    if data is None: return False
+    # Absence alone denotes a legacy case. Unknown/empty markers fail closed.
+    if 'paymentWorkflow' not in data: return True
+    if data.get('paymentWorkflow')!=PAYMENT_WORKFLOW or PAYMENTS is None: return False
+    try: return PAYMENTS.is_allowed(case) is True
+    except Exception: return False
+
+def pickup_requested(case):
+    """Physical pickup selection, independent of the payment workflow."""
     uid=case.get('user_id',''); data=case.get('data',{})
-    if isinstance(data,str): data=json.loads(data)
+    data=payment_case_data(case)
     return (not DEMO and isinstance(uid,str) and bool(re.fullmatch(r'U[0-9a-f]{32}',uid))
             and isinstance(data,dict) and data.get('shipping')=='由客服派遣物流回收')
+
+def pickup_eligible(case):
+    return pickup_requested(case) and payment_case_allowed(case)
+
+def pickup_cases_allowed(case_ids):
+    """Final read of current cases and payment authority before external I/O."""
+    with connect() as c:
+        for case_id in set(case_ids):
+            row=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
+            if not row or not pickup_eligible(dict(row)): return False
+    return True
+
+def promote_payment_case(case_id):
+    """Enroll an explicitly managed, paid/free pickup after payment DB commit."""
+    with PICKUP_NOTIFICATION_LOCK:
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
+            if not row or (payment_case_data(dict(row)) or {}).get('paymentWorkflow')!=PAYMENT_WORKFLOW:
+                return False
+            if not pickup_eligible(dict(row)): return False
+            # Build a fresh server snapshot only on the initial promotion.
+            # Subsequent calls preserve original delivery identities/history.
+            existing=c.execute('SELECT state FROM pickup_outbox WHERE case_id=?',(case_id,)).fetchone()
+            if not existing:
+                enqueue_cloud_case(c,case_id,refresh_pickup=False)
+                enroll_new_pickup_case(c,case_id)
+            enroll_new_pickup_notification(c,case_id)
+    CLOUD_WAKE.set()
+    return True
+
+def hold_payment_case(case_id):
+    """Revoke unsent pickup work/cached lists, preserving completed history."""
+    with PICKUP_NOTIFICATION_LOCK:
+        with connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
+            if not row or (payment_case_data(dict(row)) or {}).get('paymentWorkflow')!=PAYMENT_WORKFLOW:
+                return False
+            c.execute("UPDATE pickup_outbox SET state='payment_hold',next_attempt=0,last_error='payment_hold' WHERE case_id=?",(case_id,))
+            c.execute("UPDATE pickup_notification_outbox SET state='cancelled',last_error='payment_hold' WHERE case_id=? AND state IN ('waiting_sheet','pending','failed','working','needs_review')",(case_id,))
+            c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error='payment_hold' WHERE case_id=? AND state IN ('pending','failed','working')",(case_id,))
+            groups={r[0] for r in c.execute('SELECT group_id FROM pickup_notification_outbox WHERE case_id=? UNION SELECT group_id FROM pickup_dispatch_outbox WHERE case_id=?',(case_id,case_id))}
+            selected=selected_pickup_group(c)
+            if selected: groups.add(selected['group_id'])
+            for group_id in groups:
+                # Counts have no case IDs in visible text. Cancel the related
+                # group batches conservatively; retain tomorrow's schedule.
+                c.execute("UPDATE dispatch_query_events SET state='cancelled',reply_token='',last_error='payment_hold' WHERE group_id=? AND state IN ('pending','working','responding')",(group_id,))
+                c.execute('DELETE FROM dispatch_query_snapshots WHERE group_id=?',(group_id,))
+                c.execute("UPDATE dispatch_daily_jobs SET state='cancelled',last_error='payment_hold' WHERE group_id=? AND state IN ('pending','working','ready','failed')",(group_id,))
+                c.execute("UPDATE dispatch_workflow_push SET state='cancelled',last_error='payment_hold' WHERE group_id=? AND state IN ('pending','working','failed','needs_review')",(group_id,))
+    CLOUD_WAKE.set()
+    return True
 
 def cloud_timestamp(stamp=None):
     return time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime((time.time() if stamp is None else stamp)+8*3600))
@@ -662,21 +764,29 @@ def pickup_process_once():
             job=dict(row)
             c.execute("UPDATE pickup_outbox SET state='working',next_attempt=? WHERE case_id=? AND revision=?",(stamp+90,job['case_id'],job['revision']))
             run_id=c.execute('INSERT INTO pickup_sync_runs(case_id,revision,started,state) VALUES(?,?,?,?)',(job['case_id'],job['revision'],stamp,'working')).lastrowid
-        try:
-            result=pickup_upsert(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'],json.loads(job['payload']))
-            synced=isinstance(result,dict) and result.get('state')=='synced'
-        except Exception: synced=False
-        finished=time.time(); state='synced' if synced else 'failed'; error='' if synced else 'pickup_delivery_failed'
-        with connect() as c:
-            c.execute('UPDATE pickup_sync_runs SET finished=?,state=?,error=? WHERE id=?',(finished,state,error,run_id))
-            if synced:
-                updated=c.execute("UPDATE pickup_outbox SET state='synced',last_error='',synced_at=? WHERE case_id=? AND revision=?",(cloud_timestamp(),job['case_id'],job['revision']))
-                if updated.rowcount: promote_pickup_notification(c,job['case_id'])
-            else:
-                attempts=job['attempts']+1
-                delay=min(3600,30*2**min(attempts-1,7))
-                c.execute("UPDATE pickup_outbox SET state='failed',attempts=?,next_attempt=?,last_error=? WHERE case_id=? AND revision=?",(attempts,finished+delay,error,job['case_id'],job['revision']))
-        return {'processed':True,'state':state}
+        # Serialize cancellation with the actual pickup write and ACK so a
+        # refund hold cannot be overwritten by an older in-flight completion.
+        with PICKUP_NOTIFICATION_LOCK:
+            if not pickup_cases_allowed([job['case_id']]):
+                with connect() as c:
+                    c.execute("UPDATE pickup_outbox SET state='payment_hold',next_attempt=0,last_error='case_ineligible' WHERE case_id=? AND revision=? AND state='working'",(job['case_id'],job['revision']))
+                    c.execute("UPDATE pickup_sync_runs SET finished=?,state='cancelled',error='case_ineligible' WHERE id=?",(time.time(),run_id))
+                return {'processed':True,'state':'cancelled'}
+            try:
+                result=pickup_upsert(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'],json.loads(job['payload']))
+                synced=isinstance(result,dict) and result.get('state')=='synced'
+            except Exception: synced=False
+            finished=time.time(); state='synced' if synced else 'failed'; error='' if synced else 'pickup_delivery_failed'
+            with connect() as c:
+                c.execute('UPDATE pickup_sync_runs SET finished=?,state=?,error=? WHERE id=?',(finished,state,error,run_id))
+                if synced:
+                    updated=c.execute("UPDATE pickup_outbox SET state='synced',last_error='',synced_at=? WHERE case_id=? AND revision=? AND state='working'",(cloud_timestamp(),job['case_id'],job['revision']))
+                    if updated.rowcount: promote_pickup_notification(c,job['case_id'])
+                else:
+                    attempts=job['attempts']+1
+                    delay=min(3600,30*2**min(attempts-1,7))
+                    c.execute("UPDATE pickup_outbox SET state='failed',attempts=?,next_attempt=?,last_error=? WHERE case_id=? AND revision=? AND state='working'",(attempts,finished+delay,error,job['case_id'],job['revision']))
+            return {'processed':True,'state':state}
 
 def retry_existing_pickups():
     """Retry existing failed/pending enrollments only; never create jobs or LINE messages."""
@@ -773,6 +883,10 @@ def remote(url, data, bearer=None, form=False):
 def notify(case):
     if DEMO: return '測試模式：未傳送 LINE'
     if not TOKEN: return '待設定 Messaging API'
+    if case.get('status') in PAYMENT_REQUIRED_STATUSES:
+        with connect() as c: current=c.execute('SELECT * FROM cases WHERE id=?',(case['id'],)).fetchone()
+        if not current or not payment_case_allowed(dict(current)):
+            return '付款狀態暫停：未重新傳送送修進度通知'
     history=case.get('history',[])
     if isinstance(history,str): history=json.loads(history)
     message_key=hashlib.sha256(json.dumps([case['id'],case['status'],len(history) or 1]).encode()).hexdigest()
@@ -844,6 +958,7 @@ class Handler(BaseHTTPRequestHandler):
         return d
     def do_GET(self):
         url=urllib.parse.urlparse(self.path); path=url.path
+        if PAYMENTS and PAYMENTS.handle_get(self,path,url.query): return
         if path=='/healthz':
             try:
                 with closing(sqlite3.connect(DB.as_uri()+'?mode=rw',uri=True,timeout=2)) as c: c.execute('SELECT 1').fetchone()
@@ -992,7 +1107,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             size=int(self.headers.get('Content-Length',0))
             if not 0<size<=200000: return self.send(413,{'error':'資料大小錯誤'})
-            data=json.loads(self.rfile.read(size))
+            raw=self.rfile.read(size)
+            data=(json.loads(raw,object_pairs_hook=payment_json_object,parse_constant=payment_json_constant)
+                  if path.startswith('/api/payments/') else json.loads(raw))
         except Exception: return self.send(400,{'error':'資料格式錯誤'})
         if not isinstance(data,dict): return self.send(400,{'error':'資料格式錯誤'})
         if path=='/api/line-setup': return self.configure_line(data)
@@ -1027,6 +1144,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200,{'ok':True},headers)
         u=self.user()
         if not u: return self.send(401,{'error':'請先登入'})
+        if PAYMENTS and PAYMENTS.handle_post(self,path,data,u): return
         if path=='/api/line-entry':
             if DEMO or not MESSAGE_SECRET or not BOT_UID: return self.send(503,{'error':'官方 LINE 申請入口尚未設定'})
             if not u.get('lineVerified') or u.get('admin') or not re.fullmatch(r'U[0-9a-f]{32}',u['id']):
@@ -1170,6 +1288,8 @@ class Handler(BaseHTTPRequestHandler):
                           'pickupFeeTwd':350 if shipping == '由客服派遣物流回收' else None,
                           'shippingNote':'親送需要裝箱，由管理室收取；裸機送回管理室會拒收。' if shipping == '親自送回' else ''})
             clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-14-v3'})
+            if PAYMENTS is not None and PAYMENTS.new_cases_enabled is True:
+                clean['paymentWorkflow']=PAYMENT_WORKFLOW
             now=time.strftime('%Y-%m-%d %H:%M:%S'); prefix='R'+time.strftime('%Y%m%d')+'-'
             with connect() as c:
                 c.execute('BEGIN IMMEDIATE')
@@ -1182,25 +1302,39 @@ class Handler(BaseHTTPRequestHandler):
                 enqueue_cloud_case(c,ident)
                 enroll_new_pickup_case(c,ident)
                 enroll_new_pickup_notification(c,ident)
+            if clean.get('paymentWorkflow')==PAYMENT_WORKFLOW:
+                # The repair INSERT has committed before touching payments.db.
+                # Background enrollment recovers failure without opening pickup.
+                try:
+                    PAYMENTS.enroll(ident)
+                    PAYMENTS.wake()
+                except Exception: pass
             result=notify({'user_id':u['id'],'id':ident,'status':'已申請','data':clean,'history':history})
             with connect() as c:
                 c.execute('UPDATE cases SET notification=? WHERE id=?',(result,ident)); enqueue_cloud_case(c,ident); row=c.execute('SELECT * FROM cases WHERE id=?',(ident,)).fetchone()
             return self.send(201,{'case':self.case_dict(row)})
         if path in ('/api/update','/api/retry'):
             if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            send_status_notification=True
             with connect() as c:
                 row=c.execute('SELECT * FROM cases WHERE id=?',(data.get('id'),)).fetchone()
                 if not row: return self.send(404,{'error':'找不到案件'})
                 case=dict(row)
                 if path=='/api/update':
                     if data.get('status') not in STATUS: return self.send(400,{'error':'狀態錯誤'})
+                    if data['status']!=row['status'] and data['status'] in PAYMENT_REQUIRED_STATUSES and not payment_case_allowed(case):
+                        return self.send(409,{'error':'案件尚未完成付款或免付款核定，暫不能安排送修或派車','code':'payment_required'})
+                    if data['status']==row['status'] and data['status'] in PAYMENT_REQUIRED_STATUSES and not payment_case_allowed(case):
+                        send_status_notification=False
                     h=json.loads(row['history'])
                     if row['status']!=data['status']: h.append({'time':time.strftime('%Y-%m-%d %H:%M:%S'),'status':data['status'],'by':'客服'})
                     c.execute('UPDATE cases SET status=?,note=?,history=? WHERE id=?',(data['status'],str(data.get('note',''))[:8000],json.dumps(h,ensure_ascii=False),row['id']))
                     enqueue_cloud_case(c,row['id'])
                     case['status']=data['status']
                     case['history']=json.dumps(h,ensure_ascii=False)
-            result=notify(case)
+                elif row['status'] in PAYMENT_REQUIRED_STATUSES and not payment_case_allowed(case):
+                    return self.send(409,{'error':'案件付款狀態已暫停，請先完成付款核對','code':'payment_required'})
+            result=notify(case) if send_status_notification else case['notification']
             with connect() as c:
                 c.execute('UPDATE cases SET notification=? WHERE id=?',(result,case['id']))
                 enqueue_cloud_case(c,case['id'])
@@ -1349,13 +1483,15 @@ WORKFLOW = DispatchWorkflow(globals())
 
 def start_service():
     """Initialize once per Python process; imports never start network/worker IO."""
-    global SERVICE_STARTED,BOT_UID
+    global SERVICE_STARTED,BOT_UID,PAYMENTS
     with SERVICE_LOCK:
         if SERVICE_STARTED: return
         validate_service_config()
         if not DEMO:
             try: BOT_UID=inspect_bot(TOKEN,OA)['userId']
             except (ValueError,KeyError): raise ValueError('無法驗證客服 LINE 帳號，尚未開放服務。') from None
+        from production_payments import start_payments
+        PAYMENTS=start_payments(globals())
         start_cloud_worker()
         WORKFLOW.start()
         SERVICE_STARTED=True

@@ -36,6 +36,8 @@ def init_tables(c):
         first_attempt REAL NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,
         next_attempt REAL NOT NULL DEFAULT 0,last_error TEXT NOT NULL DEFAULT '',accepted_at TEXT NOT NULL DEFAULT '',
         PRIMARY KEY(job_key,sequence))''')
+    if 'case_ids' not in [r[1] for r in c.execute('PRAGMA table_info(dispatch_workflow_push)')]:
+        c.execute("ALTER TABLE dispatch_workflow_push ADD COLUMN case_ids TEXT NOT NULL DEFAULT '[]'")
 
 
 def cancel_for_group(c, group_id=None):
@@ -93,6 +95,18 @@ class DispatchWorkflow:
                 WHERE p.state='synced' OR p.synced_at<>'' ORDER BY c.created,c.id''').fetchall()
         return [row['id'] for row in rows if self.s['pickup_eligible'](dict(row))]
 
+    def cases_allowed(self, ids):
+        checker=self.s.get('pickup_cases_allowed')
+        return checker(ids) is True if checker else True
+
+    def cached_cases(self, job):
+        # New batches include all rows counted, including rows on other pages.
+        # Legacy cached cards still need a final check of visible case references.
+        ids=json.loads(job.get('case_ids','[]'))
+        if not isinstance(ids,list) or any(not isinstance(i,str) for i in ids):
+            raise ValueError('query_unavailable')
+        return sorted(set(ids)|set(re.findall(CASE,job['messages'])))
+
     def read(self, ids):
         from cloud_support import read_pickup_dispatch
         values = self.s['cloud_settings']()
@@ -104,6 +118,7 @@ class DispatchWorkflow:
             if not isinstance(got, list) or [r.get('caseId') for r in got if isinstance(r, dict)] != requested:
                 raise ValueError('query_unavailable')
             rows.extend(got)
+        if not self.cases_allowed(ids): raise ValueError('query_unavailable')
         return rows
 
     def menu(self, total=None):
@@ -190,6 +205,9 @@ class DispatchWorkflow:
             else: text = '回報已收到，目前同步尚未完成，可重新查詢名單確認。'
             return self.feedback(args['caseId']+'\n'+text)+self.menu()
         allowed = self.allowlist()
+        # Retain the authoritative scope through the final reply, even for a
+        # count/menu response which has no visible case reference.
+        job['paymentCaseIds']=allowed
         if kind == 'case':
             if args['caseId'] not in allowed: return [{'type':'text','text':'此案件不在已自動加入的派車名單中。'}]+self.menu()
             row = self.read([args['caseId']])[0]
@@ -231,7 +249,9 @@ class DispatchWorkflow:
                     return {'processed':True,'state':'cancelled'}
                 job=dict(row); c.execute("UPDATE dispatch_query_events SET state='working' WHERE event_id=?", (job['event_id'],))
             try: messages=self.messages(job)
-            except Exception: messages=[{'type':'text','text':'查詢暫不可用，請稍後重新查詢。'}]+self.menu()
+            except Exception:
+                job['paymentCaseIds']=[]
+                messages=[{'type':'text','text':'查詢暫不可用，請稍後重新查詢。'}]+self.menu()
             # Google I/O above deliberately holds no membership/binding lock.
             with self.s['PICKUP_NOTIFICATION_LOCK']:
                 with self.s['connect']() as c:
@@ -240,7 +260,14 @@ class DispatchWorkflow:
                     if not valid:
                         c.execute("UPDATE dispatch_query_events SET state='expired',reply_token='',last_error='reply_expired' WHERE event_id=? AND state='working'", (job['event_id'],))
                         return {'processed':True,'state':'expired'}
+                    if not self.cases_allowed(job.get('paymentCaseIds',[])):
+                        c.execute("UPDATE dispatch_query_events SET state='cancelled',reply_token='',last_error='payment_hold' WHERE event_id=? AND state='working'",(job['event_id'],))
+                        return {'processed':True,'state':'cancelled'}
                     c.execute("UPDATE dispatch_query_events SET state='responding',reply_token='' WHERE event_id=? AND state='working'", (job['event_id'],))
+                if not self.cases_allowed(job.get('paymentCaseIds',[])):
+                    with self.s['connect']() as c:
+                        c.execute("UPDATE dispatch_query_events SET state='cancelled',last_error='payment_hold' WHERE event_id=? AND state='responding'",(job['event_id'],))
+                    return {'processed':True,'state':'cancelled'}
                 try: result=self.s['send_reply'](self.s['TOKEN'],job['reply_token'],messages)
                 except Exception: result=None
                 state='accepted' if isinstance(result,dict) and result.get('state')=='accepted' else 'failed'
@@ -274,9 +301,9 @@ class DispatchWorkflow:
             key='daily:'+setting['group_id']+':'+today
             return bool(c.execute('INSERT OR IGNORE INTO dispatch_daily_jobs(job_key,group_id,local_date,created) VALUES(?,?,?,?)', (key,setting['group_id'],today,self.clock())).rowcount)
 
-    def add_push(self,c,key,group,messages,sequence=0):
-        c.execute('''INSERT OR IGNORE INTO dispatch_workflow_push(job_key,sequence,group_id,messages,retry_key,created)
-            VALUES(?,?,?,?,?,?)''', (key,sequence,group,json.dumps(messages,ensure_ascii=False),str(uuid.uuid4()),self.clock()))
+    def add_push(self,c,key,group,messages,sequence=0,case_ids=None):
+        c.execute('''INSERT OR IGNORE INTO dispatch_workflow_push(job_key,sequence,group_id,messages,retry_key,created,case_ids)
+            VALUES(?,?,?,?,?,?,?)''', (key,sequence,group,json.dumps(messages,ensure_ascii=False),str(uuid.uuid4()),self.clock(),json.dumps(case_ids or [])))
 
     def menu_push(self,request_id):
         try:
@@ -309,7 +336,10 @@ class DispatchWorkflow:
                     c.execute('BEGIN IMMEDIATE'); setting=c.execute('SELECT * FROM dispatch_workflow_settings WHERE singleton=1').fetchone()
                     current=c.execute('SELECT state FROM dispatch_daily_jobs WHERE job_key=?',(job['job_key'],)).fetchone()
                     if not current or current['state']!='working' or not setting['daily_enabled'] or not self.group(c,job['group_id']): return {'processed':True,'state':'cancelled'}
-                    for seq,batch in enumerate(batches): self.add_push(c,job['job_key'],job['group_id'],batch,seq)
+                    if not self.cases_allowed(ids):
+                        c.execute("UPDATE dispatch_daily_jobs SET state='cancelled',last_error='payment_hold' WHERE job_key=?",(job['job_key'],))
+                        return {'processed':True,'state':'cancelled'}
+                    for seq,batch in enumerate(batches): self.add_push(c,job['job_key'],job['group_id'],batch,seq,ids)
                     c.execute("UPDATE dispatch_daily_jobs SET state='ready',last_error='' WHERE job_key=?", (job['job_key'],))
                 return {'processed':True,'state':'ready'}
             except Exception:
@@ -334,12 +364,23 @@ class DispatchWorkflow:
                         return {'processed':True,'state':'cancelled'}
                 if not self.available() or not self.group(c,row['group_id']):
                     c.execute("UPDATE dispatch_workflow_push SET state='cancelled' WHERE job_key=? AND sequence=?", (row['job_key'],row['sequence'])); return {'processed':True,'state':'cancelled'}
+                try: payment_allowed=self.cases_allowed(self.cached_cases(dict(row)))
+                except Exception: payment_allowed=False
+                if not payment_allowed:
+                    c.execute("UPDATE dispatch_workflow_push SET state='cancelled',last_error='payment_hold' WHERE job_key=? AND state IN ('pending','working','failed','needs_review')",(row['job_key'],))
+                    c.execute("UPDATE dispatch_daily_jobs SET state='cancelled',last_error='payment_hold' WHERE job_key=? AND state<>'completed'",(row['job_key'],))
+                    return {'processed':True,'state':'cancelled'}
                 if row['first_attempt'] and now-row['first_attempt']>=RETRY_SECONDS:
                     c.execute("UPDATE dispatch_workflow_push SET state='needs_review',last_error='retry_window_expired' WHERE job_key=? AND sequence=?", (row['job_key'],row['sequence'])); return {'processed':True,'state':'needs_review'}
                 job=dict(row); first=job['first_attempt'] or now; attempts=job['attempts']+1
                 c.execute("UPDATE dispatch_workflow_push SET state='working',first_attempt=?,attempts=?,next_attempt=? WHERE job_key=? AND sequence=?", (first,attempts,now+90,job['job_key'],job['sequence']))
             try:
                 from line_support import send_group_messages
+                if not self.cases_allowed(self.cached_cases(job)):
+                    with self.s['connect']() as c:
+                        c.execute("UPDATE dispatch_workflow_push SET state='cancelled',last_error='payment_hold' WHERE job_key=? AND state IN ('pending','working','failed','needs_review')",(job['job_key'],))
+                        c.execute("UPDATE dispatch_daily_jobs SET state='cancelled',last_error='payment_hold' WHERE job_key=? AND state<>'completed'",(job['job_key'],))
+                    return {'processed':True,'state':'cancelled'}
                 result=send_group_messages(self.s['TOKEN'],job['group_id'],json.loads(job['messages']),job['retry_key'])
             except Exception: result={'state':'failed','retryable':True,'ambiguous':True}
             accepted=(isinstance(result,dict) and result.get('state')=='accepted' and type(result.get('httpStatus')) is int and result['httpStatus'] in (200,409) and result.get('retryKey')==job['retry_key'])
