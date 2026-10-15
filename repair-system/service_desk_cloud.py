@@ -414,12 +414,24 @@ def bootstrap(*, config=None, data_dir=DATA_DIRECTORY, seed_path=None, start_wor
             'url': 'https://docs.google.com/spreadsheets/d/' + TEST_SHEET_ID + '/edit#gid=515406948'}
         server.service_desk_reconciliation_service()
         sync = server.service_desk_payment_sheet_service()
+        def case_quote(case_id):
+            wrapper = desk.get_case(case_id)
+            return {**wrapper, 'quote': wrapper['case'].get('latestQuote')}
         operations = ServiceDeskOperations(server.service_desk_connect,
-            quote_reader=lambda cid: (lambda data: {'case': data['case'], 'quote': data['case'].get('latestQuote')})(desk.get_case(cid)),
+            quote_reader=case_quote,
             payment_reader=lambda cid: next(iter(sync.preview(cid)['rows']), None),
             allowed_case_ids=lambda cid: cid in server.service_desk_allowed_case_ids())
         operations.init()
         server.SERVICE_DESK_OPERATIONS = operations
+        from service_desk_receipts import ServiceDeskReceipts
+        receipts = ServiceDeskReceipts(server.service_desk_connect,
+            quote_reader=case_quote,
+            payment_reader=lambda cid: sync.preview()['rows'] if cid is None else next(iter(sync.preview(cid)['rows']), None),
+            sender=server.SERVICE_DESK_LINE_TEST_SENDER,
+            allowed_case_ids=server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES,
+            enabled=config.automation_enabled)
+        receipts.init()
+        server.SERVICE_DESK_RECEIPTS = receipts
         runtime = Runtime(server, config)
         if config.sheet_endpoint:
             from payment_sheet_worker import PaymentSheetWorker
@@ -436,7 +448,7 @@ def bootstrap(*, config=None, data_dir=DATA_DIRECTORY, seed_path=None, start_wor
             enabled=config.automation_enabled)
         automation.init()
         server.SERVICE_DESK_AUTOMATION = automation
-        runtime.workers.extend((automation, BackupWorker(database)))
+        runtime.workers.extend((automation, receipts, BackupWorker(database)))
     with _bootstrap_stage('workers'):
         if start_workers:
             for worker in runtime.workers:

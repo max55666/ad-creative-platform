@@ -140,7 +140,7 @@ class ServiceDeskOperations:
         quote_ids = [row['id'] for row in quotes]
         for row in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wb_%' ORDER BY name").fetchall():
             table = row['name']
-            if (table in facts or table.startswith(('wb_ops_', 'wb_auto_', 'wb_payment_sheet_'))
+            if (table in facts or table.startswith(('wb_ops_', 'wb_auto_', 'wb_payment_sheet_', 'wb_receipt_'))
                     or not re.fullmatch(r'wb_[A-Za-z0-9_]+', table)):
                 continue
             columns = {item['name'] for item in c.execute('PRAGMA table_info("' + table + '")')}

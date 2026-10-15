@@ -85,6 +85,7 @@ SERVICE_DESK_CLOUD_INTERNAL = False
 SERVICE_DESK_AUTOMATION = None
 SERVICE_DESK_OPERATIONS = None
 SERVICE_DESK_TEST_INTAKE = None
+SERVICE_DESK_RECEIPTS = None
 PAYMENT_LAB_MAX_BODY = 16384
 PAYMENT_LAB_HEADERS = {
     'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
@@ -174,7 +175,60 @@ def service_desk_fetch_exact_order(number):
 
 def service_desk_after_payment(result, case_id):
     return {**result, 'paymentSheetSync': service_desk_enqueue_payment_sheet(case_id),
-            'operations': service_desk_refresh_operations(case_id)}
+            'operations': service_desk_refresh_operations(case_id),
+            'paymentReceipt': service_desk_enqueue_receipt(case_id)}
+
+
+def service_desk_enqueue_receipt(case_id, force=False):
+    if SERVICE_DESK_RECEIPTS is None or not service_desk_enabled():
+        return {'configured': False, 'queued': False, 'internalOnly': True,
+                'realPayment': False, 'releaseAllowed': False}
+    if case_id not in service_desk_allowed_case_ids():
+        return {'configured': True, 'queued': False, 'code': 'not_allowed',
+                'internalOnly': True, 'realPayment': False, 'releaseAllowed': False}
+    try:
+        result = SERVICE_DESK_RECEIPTS.enqueue(case_id, force=force)
+        SERVICE_DESK_RECEIPTS.wake()
+        return result
+    except Exception:
+        return {'configured': True, 'queued': False, 'state': 'failed', 'internalOnly': True,
+                'realPayment': False, 'releaseAllowed': False,
+                'message': '付款結果已保存，付款成功 LINE 通知排程需重試'}
+
+
+def service_desk_payment_receipt(quote_id, payload):
+    if type(payload) is not dict or set(payload) != {'requestId'}:
+        raise ValueError('付款確認通知只接受本次請求識別碼')
+    service_desk_request_id(payload['requestId'])
+    wrapper = service_desk_scoped_quote(quote_id)
+    quote, case = wrapper['quote'], wrapper['case']
+    if (quote.get('status') != 'active' or case.get('latestQuote', {}).get('id') != quote_id
+            or type(quote.get('total')) is not int or quote['total'] <= 0):
+        raise ValueError('付款確認通知只適用目前正額報價的已付款案件')
+    number = service_desk_bound_order(quote_id)
+    order = service_desk_fetch_exact_order(number)
+    observation = service_desk_reconciliation_service().record(order, wrapper, str(uuid.uuid4()),
+        provenance={'freshProviderLookup': True, 'readOnly': True})
+    after = service_desk_after_payment(observation, case['id'])
+    decision = observation.get('result', {})
+    facts = decision.get('facts', {})
+    rows = service_desk_payment_sheet_service().preview(case['id']).get('rows', [])
+    projection = rows[0] if len(rows) == 1 else {}
+    if (observation.get('source') != 'shopline_api_completed'
+            or decision.get('state') not in ('matched_internal_only', 'duplicate')
+            or decision.get('reasons') != [] or facts.get('providerPaymentStatus') != 'completed'
+            or facts.get('freshProviderLookup') is not True or facts.get('currentQuote') is not True
+            or facts.get('quoteVersion') != quote['version']
+            or projection.get('caseId') != case['id'] or projection.get('quoteVersion') != quote['version']
+            or projection.get('paymentStatus') != '已付款'
+            or type(projection.get('amountPaid')) is not int or projection['amountPaid'] != quote['total']
+            or projection.get('amountDue') != quote['total']):
+        raise ValueError('本次付款或退款重新核對未通過，未要求發送付款成功通知')
+    # force is server-owned and only allows an existing paid baseline to be
+    # enrolled explicitly. The receipt ledger still refuses accepted/refunded
+    # payments and uses one persistent provider retry key per matched payment.
+    after['paymentReceipt'] = service_desk_enqueue_receipt(case['id'], force=True)
+    return after
 
 
 def service_desk_mark_dispatched(case_id, payload, actor):
@@ -1382,6 +1436,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.payment_lab_send(200, service_desk_payment_sheet_state())
             if path == '/api/service-desk/automation/state':
                 return self.payment_lab_send(200, service_desk_automation_status())
+            if path == '/api/service-desk/receipts/state':
+                if SERVICE_DESK_RECEIPTS is None:
+                    return self.payment_lab_send(503, {'error': '付款成功 LINE 通知尚未設定'})
+                return self.payment_lab_send(200, SERVICE_DESK_RECEIPTS.status())
             if path == '/api/service-desk/operations/state':
                 if SERVICE_DESK_OPERATIONS is None:
                     return self.payment_lab_send(503, {'error': '內測派車門檻尚未設定'})
@@ -1422,11 +1480,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.payment_lab_admin():
             return
         route = re.fullmatch(
-            r'/api/service-desk/(cases|quotes|orders)/([A-Za-z0-9-]{1,64})/(quote|notify|simulate|bind|line-test|reconcile|manual-match|refund-refresh|refund-close|dispatch|refund-action)', path)
+            r'/api/service-desk/(cases|quotes|orders)/([A-Za-z0-9-]{1,64})/(quote|notify|simulate|bind|line-test|reconcile|manual-match|refund-refresh|refund-close|dispatch|refund-action|receipt)', path)
         allowed = {('cases', 'quote'), ('quotes', 'notify'), ('quotes', 'simulate'),
                    ('orders', 'bind'), ('quotes', 'line-test'), ('quotes', 'reconcile'),
                    ('quotes', 'manual-match'), ('quotes', 'refund-refresh'), ('quotes', 'refund-close'),
-                   ('cases', 'dispatch'), ('cases', 'refund-action')}
+                   ('cases', 'dispatch'), ('cases', 'refund-action'), ('quotes', 'receipt')}
         if (path not in ('/api/service-desk/cases', '/api/service-desk/shopline/fetch',
                         '/api/service-desk/payment-sheet/prepare', '/api/service-desk/intake-invites')
                 and (not route or (route.group(1), route.group(3)) not in allowed)):
@@ -1480,6 +1538,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/service-desk/cases':
                 return self.payment_lab_send(201, service.create_case(data))
             identity, action = route.group(2), route.group(3)
+            if action == 'receipt':
+                if SERVICE_DESK_RECEIPTS is None:
+                    return self.payment_lab_send(503, {'error': '付款成功 LINE 通知尚未設定'})
+                from shopline_preview import PreviewBusy
+                try:
+                    return self.payment_lab_send(200, service_desk_payment_receipt(identity, data))
+                except PreviewBusy:
+                    return self.payment_lab_send(429, {'error': '請稍候再核對付款；本次未要求付款成功通知'}, {'Retry-After': '30'})
             if action in ('dispatch', 'refund-action'):
                 if identity not in service_desk_allowed_case_ids():
                     raise ValueError('此案件未列入內測作業名單')
