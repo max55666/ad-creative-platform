@@ -118,6 +118,15 @@ class DispatchWorkflow:
         from dispatch_cards import case_messages
         return case_messages(row, queried)
 
+    def feedback(self, title, queried=None, result=None):
+        queried=queried or dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S')
+        return [{'type':'text','text':title+('\n'+result if result else '')+'\n時間：'+queried}]
+
+    def list_feedback(self, title, queried, messages):
+        if messages and messages[0].get('type')=='text':
+            return [{**messages[0],'text':title+'\n'+messages[0]['text']}]+messages[1:]
+        return self.feedback(title,queried)+messages
+
     def enqueue(self, event):
         parsed = parse(event)
         if not parsed or not self.available(): return False
@@ -166,33 +175,34 @@ class DispatchWorkflow:
 
     def messages(self, job):
         kind, args = job['kind'], json.loads(job['args'])
-        if kind == 'menu': return self.menu()
+        if kind == 'menu': return self.feedback('已開啟派車工作選單')+self.menu()
         if kind == 'error': return [{'type':'text','text':'此案件不在已自動加入的派車名單中，無法查詢或回報。'}]+self.menu()
         if kind == 'dispatch':
             with self.s['connect']() as c: queued = c.execute('SELECT * FROM pickup_dispatch_outbox WHERE case_id=?', (args['caseId'],)).fetchone()
             if not queued: raise ValueError('query_unavailable')
             if queued['command_id'] != job['event_id']:
-                text='已有回報處理中，可更新名單確認。' if queued['state'] in ('pending','working','failed') else '此回報未覆寫最新指令，可更新名單確認。'
-                return [{'type':'text','text':text}]+self.menu()
+                text='已有回報處理中，可重新查詢名單確認。' if queued['state'] in ('pending','working','failed') else '此回報未覆寫最新指令，可重新查詢名單確認。'
+                return self.feedback(text)+self.menu()
             result = self.s['pickup_dispatch_process_once'](case_id=args['caseId'])
             with self.s['connect']() as c: queued = c.execute('SELECT * FROM pickup_dispatch_outbox WHERE case_id=?', (args['caseId'],)).fetchone()
             if queued['state'] == 'completed':
                 text = '已更新派車狀態為「已派車」。' if queued['result_action'] == 'updated' else '已處理回報；已有狀態保持原樣。'
-            else: text = '回報已收到，目前同步尚未完成，可更新名單確認。'
-            return [{'type':'text','text':args['caseId']+'\n'+text}]+self.menu()
+            else: text = '回報已收到，目前同步尚未完成，可重新查詢名單確認。'
+            return self.feedback(args['caseId']+'\n'+text)+self.menu()
         allowed = self.allowlist()
         if kind == 'case':
             if args['caseId'] not in allowed: return [{'type':'text','text':'此案件不在已自動加入的派車名單中。'}]+self.menu()
             row = self.read([args['caseId']])[0]
             queried=dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S')
-            return self.case_cards(row,queried)
+            return self.feedback('案件資料已查詢',queried)+self.case_cards(row,queried)
         rows = self.read(allowed)
         unassigned = [row for row in rows if row['status'] == '']
         queried = dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S')
-        if kind == 'count': return [{'type':'text','text':'目前未派車 '+str(len(unassigned))+' 筆。\n查詢時間：'+queried}]+self.menu(len(unassigned))
+        if kind == 'count': return self.feedback('未派車數量已查詢',queried,'目前未派車 '+str(len(unassigned))+' 筆。')+self.menu(len(unassigned))
         if kind in ('list','refresh'):
             ident = self.snapshot(job['group_id'],[row['caseId'] for row in unassigned])
-            return self.cards(unassigned[:10],len(unassigned),ident,1,max(1,math.ceil(len(unassigned)/10)),queried)
+            title='已更新未派車名單' if kind=='refresh' else '未派車名單已查詢'
+            return self.list_feedback(title,queried,self.cards(unassigned[:10],len(unassigned),ident,1,max(1,math.ceil(len(unassigned)/10)),queried))
         if kind == 'next':
             with self.s['connect']() as c:
                 if args.get('snapshot'):
@@ -201,11 +211,11 @@ class DispatchWorkflow:
                     snap = c.execute('SELECT * FROM dispatch_query_snapshots WHERE group_id=? AND expires>? ORDER BY created DESC LIMIT 1', (job['group_id'],self.clock())).fetchone()
             if not snap: return [{'type':'text','text':'名單已逾期，請重新查詢未派車名單。'}]+self.menu()
             ids = json.loads(snap['case_ids']); page = args.get('page',snap['next_page']); pages=max(1,math.ceil(len(ids)/10))
-            if page > pages: return [{'type':'text','text':'已是最後一頁，可更新名單查看最新狀態。'}]+self.menu(len(unassigned))
+            if page > pages: return self.feedback('已是最後一頁，可重新查詢名單查看最新狀態。',queried)+self.menu(len(unassigned))
             page_ids = set(ids[(page-1)*10:page*10])
             shown = [row for row in unassigned if row['caseId'] in page_ids]
             with self.s['connect']() as c: c.execute('UPDATE dispatch_query_snapshots SET next_page=MAX(next_page,?) WHERE id=?', (page+1,snap['id']))
-            return self.cards(shown,len(unassigned),snap['id'],page,pages,queried)
+            return self.list_feedback('已載入名單第 '+str(page)+' / '+str(pages)+' 頁',queried,self.cards(shown,len(unassigned),snap['id'],page,pages,queried))
         raise ValueError('query_unavailable')
 
     def query_once(self):

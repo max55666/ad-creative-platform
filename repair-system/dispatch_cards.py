@@ -5,6 +5,7 @@ import re
 
 
 GREEN = "#315e50"
+BUTTON_COLOR = "#e4eee8"
 _CASE_ID = re.compile(r"R[0-9]{8}-[0-9]{4,}\Z")
 _SNAPSHOT = re.compile(r"[A-Za-z0-9_-]{16,64}\Z")
 _CASE_FIELDS = {"caseId", "name", "phone", "address", "model"}
@@ -51,14 +52,13 @@ def _text(text, size="sm", color="#17352d", weight="regular"):
             "color": color, "weight": weight, "wrap": True}
 
 
-def _postback(label, data, display_text=None, primary=False):
+def _postback(label, data, display_text=None):
     _text_value(label, 40, True)
     _text_value(data, 300, True)
-    action = {"type": "postback", "label": label, "data": data}
-    if display_text is not None:
-        action["displayText"] = _text_value(display_text, 300, True)
-    return {"type": "button", "height": "sm", "style": "primary" if primary else "link",
-            "color": GREEN, "action": action}
+    action = {"type": "postback", "label": label, "data": data,
+              "displayText": _text_value(label if display_text is None else display_text, 300, True)}
+    return {"type": "button", "height": "sm", "style": "secondary",
+            "color": BUTTON_COLOR, "action": action}
 
 
 def _bubble(title, contents, buttons=None):
@@ -88,13 +88,12 @@ def menu_messages(total=None, title="派車工作選單"):
     title = _text_value(title, 100, True)
     if total is not None:
         _integer(total)
-    line = "點選按鈕查看最新派車資料。" if total is None else "目前未派車：" + str(total) + " 筆"
+    line = "請選擇要查詢的內容。" if total is None else "目前未派車：" + str(total) + " 筆"
     contents = [_text(line, "lg", GREEN, "bold"),
-                _text("名單以查詢當下的試算表狀態為準。", color="#6b817b")]
-    buttons = [_postback("未派車筆數", "pv1:count"),
-               _postback("完整名單", "pv1:list", primary=True),
-               _postback("更新名單", "pv1:refresh"),
-               _postback("工作選單", "pv1:menu")]
+                _text("點選後，查詢結果會回覆在聊天室。", color="#6b817b"),
+                _text("每次查詢都會讀取最新的試算表狀態。", "xs", "#6b817b")]
+    buttons = [_postback("查詢未派車筆數", "pv1:count"),
+               _postback("查看未派車名單", "pv1:list")]
     return [_flex(title, _bubble(title, contents, buttons))]
 
 
@@ -126,14 +125,14 @@ def _case_bubble(case, title="未派車案件", include_status=False):
     for label, key in (("姓名", "name"), ("聯絡電話", "phone"), ("回收地址", "address"), ("機型", "model")):
         body.append({"type": "box", "layout": "vertical", "spacing": "xs", "contents": [
             _text(label, "xs", "#6b817b"), _text(values[key] or "未提供", "md")]})
-    buttons = [_postback("標記已派車", "pv1:dispatch:" + ident, ident + " 已派車", primary=True)]
+    buttons = [_postback("標記已派車", "pv1:dispatch:" + ident, "將 " + ident + " 標記為已派車")]
     phone_uri = _telephone(values["phone"])
     if phone_uri:
-        buttons.append({"type": "button", "height": "sm", "style": "link",
-                        "color": GREEN, "action": {"type": "uri", "label": "手機撥打", "uri": phone_uri}})
+        buttons.append({"type": "button", "height": "sm", "style": "secondary",
+                        "color": BUTTON_COLOR, "action": {"type": "uri", "label": "手機撥打", "uri": phone_uri}})
     address = values["address"]
     if address.strip() and _units(address) <= 1000:
-        buttons.append({"type": "button", "height": "sm", "style": "link", "color": GREEN,
+        buttons.append({"type": "button", "height": "sm", "style": "secondary", "color": BUTTON_COLOR,
                         "action": {"type": "clipboard", "label": "複製地址", "clipboardText": address}})
     elif address.strip():
         body.append(_text("地址較長，請直接選取完整地址複製。", "xs", "#6b817b"))
@@ -170,13 +169,13 @@ def list_messages(cases, total, snapshot_id, page, page_count, queried_at, daily
                 *menu_messages(0)]
     buttons = []
     if page < page_count:
-        buttons.append(_postback("下一頁", "pv1:next:" + snapshot_id + ":" + str(page + 1), primary=True))
-    buttons.extend([_postback("更新名單", "pv1:refresh"), _postback("工作選單", "pv1:menu")])
+        buttons.append(_postback("查看下一頁", "pv1:next:" + snapshot_id + ":" + str(page + 1)))
+    buttons.extend([_postback("重新查詢名單", "pv1:refresh"), _postback("返回工作選單", "pv1:menu")])
     if not cases:
-        return [{"type": "text", "text": "本頁已無待派車案件，可更新名單。\n目前未派車 " + str(total)
+        return [{"type": "text", "text": "本頁已無待派車案件，可重新查詢名單。\n目前未派車 " + str(total)
                  + " 筆\n本次名單第 " + str(page) + " / " + str(page_count) + " 頁\n查詢時間：" + queried_at},
                 *menu_messages(total),
-                _flex("名單操作", _bubble("名單操作", [_text("查看下一頁或更新最新名單。")], buttons))]
+                _flex("名單操作", _bubble("名單操作", [_text("點選後，查詢結果會回覆在聊天室。")], buttons))]
     bubbles = [_case_bubble(case) for case in cases]
     if len({case["caseId"] for case in cases}) != len(cases):
         _bad()
@@ -196,14 +195,14 @@ def list_messages(cases, total, snapshot_id, page, page_count, queried_at, daily
     info = [_text("目前未派車 " + str(total) + " 筆", "lg", GREEN, "bold"),
             _text("本次名單第 " + str(page) + " / " + str(page_count) + " 頁 · 左右滑動查看案件"),
             _text("查詢時間：" + queried_at, "xs", "#6b817b"),
-            _text("舊卡片不會自動更新；操作前可點「更新名單」。", "xs", "#6b817b")]
+            _text("舊卡片不會自動更新；操作前可點「重新查詢名單」。", "xs", "#6b817b")]
     alt = title + "｜目前未派車 " + str(total) + " 筆｜本次名單第 " + str(page) + "/" + str(page_count) + " 頁"
     # Normal pages have a header, one carousel, and a footer. Large pages keep
     # the full data and place their navigation in the header instead.
     messages = [_flex(alt, _bubble(title, info, buttons if len(chunks) > 1 else None))]
     messages.extend(_flex(alt, {"type": "carousel", "contents": chunk}) for chunk in chunks)
     if len(chunks) == 1:
-        messages.append(_flex("名單操作", _bubble("名單操作", [_text("查詢最新資料或返回工作選單。")], buttons)))
+        messages.append(_flex("名單操作", _bubble("名單操作", [_text("點選後，查詢結果會回覆在聊天室。")], buttons)))
     if len(messages) > 3 or _json_size(messages) > 200000:
         _bad()
     return messages
