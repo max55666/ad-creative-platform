@@ -19,12 +19,15 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import threading
 import time
 from urllib.parse import urlsplit
 import uuid
 
 DATA_DIRECTORY = Path('/var/data/service-desk')
+_RENDER_SECRET_ROOT = Path('/etc/secrets')
+_RENDER_SECRET_FILENAMES = frozenset({'service-desk-config.json', 'service-desk-seed.b64'})
 TEST_SHEET_ID = '1hu5VVS3Ark9Iv-SD4JYFuBfEOqkUQrf7yMlUWuWi1R4'
 APPROVED_CASE_ID = 'WB-fc9b8753-a8b1-47bb-a01d-a158d1ec57f1'
 APPROVED_CASE_NUMBER = 'R20261014-0006'
@@ -56,13 +59,34 @@ def _unique(pairs):
     return result
 
 
+def _platform_secret(path):
+    return path.parent == _RENDER_SECRET_ROOT and path.name in _RENDER_SECRET_FILENAMES
+
+
 def _read_file(path, maximum):
     path = Path(path)
-    if (not path.is_absolute() or path.is_symlink() or not path.is_file()
-            or path.resolve() != path.absolute() or path.stat().st_nlink != 1
-            or path.stat().st_size > maximum):
+    if not path.is_absolute():
         _fail()
-    return path.read_bytes()
+    if _platform_secret(path):
+        # Render owns these two fixed files. Its secret mount may use symlinks
+        # for atomic updates; follow those only inside the same secret root.
+        root = _RENDER_SECRET_ROOT.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            _fail()
+    else:
+        if (path.is_symlink() or not path.is_file()
+                or path.resolve() != path.absolute() or path.stat().st_nlink != 1):
+            _fail()
+        resolved = path
+    with resolved.open('rb') as source:
+        metadata = os.fstat(source.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            _fail()
+        raw = source.read(maximum + 1)
+    if len(raw) > maximum:
+        _fail()
+    return raw
 
 
 def _credential(value, minimum=1, maximum=4096):
@@ -95,7 +119,8 @@ class Configuration:
     def load(cls, environ=None):
         env = os.environ if environ is None else environ
         config_path = Path(env.get('SERVICE_DESK_CONFIG_FILE', '/etc/secrets/service-desk-config.json'))
-        if not config_path.is_absolute() or config_path.is_symlink():
+        if (not config_path.is_absolute()
+                or config_path.is_symlink() and not _platform_secret(config_path)):
             _fail()
         settings = {}
         if config_path.exists():
