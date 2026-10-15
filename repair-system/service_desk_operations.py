@@ -140,7 +140,7 @@ class ServiceDeskOperations:
         quote_ids = [row['id'] for row in quotes]
         for row in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wb_%' ORDER BY name").fetchall():
             table = row['name']
-            if (table in facts or table.startswith(('wb_ops_', 'wb_auto_', 'wb_payment_sheet_', 'wb_receipt_'))
+            if (table in facts or table.startswith(('wb_ops_', 'wb_auto_', 'wb_payment_sheet_', 'wb_receipt_', 'wb_refund_notice_'))
                     or not re.fullmatch(r'wb_[A-Za-z0-9_]+', table)):
                 continue
             columns = {item['name'] for item in c.execute('PRAGMA table_info("' + table + '")')}
@@ -199,7 +199,7 @@ class ServiceDeskOperations:
             and type(projection.get('quoteVersion')) is int and projection['quoteVersion'] == quote['version']
             and type(projection.get('amountDue')) is int and projection['amountDue'] == quote['total'])
         payment_status = projection.get('paymentStatus', '') if current_projection else ''
-        refunded = current_projection and payment_status == '退款需處理'
+        refunded = current_projection and payment_status in ('退款需處理', '已退款')
         free = (quote is not None and quote['total'] == 0 and not data['pickup']
                 and quote['paymentStatus'] == 'no_payment_required')
         paid = (current_projection and payment_status == '已付款'

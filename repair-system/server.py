@@ -86,6 +86,7 @@ SERVICE_DESK_AUTOMATION = None
 SERVICE_DESK_OPERATIONS = None
 SERVICE_DESK_TEST_INTAKE = None
 SERVICE_DESK_RECEIPTS = None
+SERVICE_DESK_REFUND_NOTICES = None
 PAYMENT_LAB_MAX_BODY = 16384
 PAYMENT_LAB_HEADERS = {
     'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
@@ -176,7 +177,57 @@ def service_desk_fetch_exact_order(number):
 def service_desk_after_payment(result, case_id):
     return {**result, 'paymentSheetSync': service_desk_enqueue_payment_sheet(case_id),
             'operations': service_desk_refresh_operations(case_id),
-            'paymentReceipt': service_desk_enqueue_receipt(case_id)}
+            'paymentReceipt': service_desk_enqueue_receipt(case_id),
+            'refundNotice': service_desk_enqueue_refund_notice(case_id)}
+
+
+def service_desk_enqueue_refund_notice(case_id, force=False):
+    if SERVICE_DESK_REFUND_NOTICES is None or not service_desk_enabled():
+        return {'configured': False, 'queued': False, 'internalOnly': True,
+                'realPayment': False, 'releaseAllowed': False}
+    if case_id not in service_desk_allowed_case_ids():
+        return {'configured': True, 'queued': False, 'code': 'not_allowed',
+                'internalOnly': True, 'realPayment': False, 'releaseAllowed': False}
+    try:
+        result = SERVICE_DESK_REFUND_NOTICES.enqueue(case_id, force=force)
+        SERVICE_DESK_REFUND_NOTICES.wake()
+        return result
+    except Exception:
+        return {'configured': True, 'queued': False, 'state': 'failed', 'internalOnly': True,
+                'realPayment': False, 'releaseAllowed': False,
+                'message': '退款結果已保存，退款 LINE 通知排程需重試'}
+
+
+def service_desk_refund_notice(quote_id, payload):
+    if type(payload) is not dict or set(payload) != {'requestId'}:
+        raise ValueError('退款通知只接受本次請求識別碼')
+    service_desk_request_id(payload['requestId'])
+    wrapper = service_desk_scoped_quote(quote_id)
+    quote, case = wrapper['quote'], wrapper['case']
+    if (quote.get('status') != 'active' or case.get('latestQuote', {}).get('id') != quote_id
+            or type(quote.get('total')) is not int or quote['total'] <= 0):
+        raise ValueError('退款通知只適用目前正額報價的已退款案件')
+    number = service_desk_bound_order(quote_id)
+    order = service_desk_fetch_exact_order(number)
+    observation = service_desk_reconciliation_service().record(order, wrapper, str(uuid.uuid4()),
+        provenance={'freshProviderLookup': True, 'readOnly': True})
+    after = service_desk_after_payment(observation, case['id'])
+    decision = observation.get('result', {})
+    facts = decision.get('facts', {})
+    rows = service_desk_payment_sheet_service().preview(case['id']).get('rows', [])
+    projection = rows[0] if len(rows) == 1 else {}
+    if (decision.get('state') != 'blocked' or decision.get('reasons') != ['refunded']
+            or facts.get('providerPaymentStatus') not in ('refunding', 'refunded')
+            or facts.get('freshProviderLookup') is not True or facts.get('currentQuote') is not True
+            or facts.get('quoteVersion') != quote['version']
+            or projection.get('caseId') != case['id'] or projection.get('quoteVersion') != quote['version']
+            or projection.get('paymentStatus') != '已退款'
+            or projection.get('amountDue') != quote['total']):
+        raise ValueError('本次 SHOPLINE 退款重新核對未通過，未要求發送退款通知')
+    # A closed follow-up does not undo a verified refund. The notice ledger
+    # deduplicates the bound payment and cannot be reset by browser request IDs.
+    after['refundNotice'] = service_desk_enqueue_refund_notice(case['id'], force=True)
+    return after
 
 
 def service_desk_enqueue_receipt(case_id, force=False):
@@ -324,8 +375,8 @@ def service_desk_refund_refresh(quote_id, payload, actor='管理員', close=Fals
         provenance={'freshProviderLookup': True, 'readOnly': True})
     after = service_desk_after_payment(result, wrapper['case']['id'])
     if close:
-        if order.get('reportedPaymentStatus') != 'refunded':
-            raise ValueError('SHOPLINE 本次尚未回報全額退款完成，不能結案')
+        if order.get('reportedPaymentStatus') not in ('refunding', 'refunded'):
+            raise ValueError('退款追蹤須由 SHOPLINE 本次回報「退款中」或「已退款」後才能結案')
         after['refundClose'] = reconciliation.close_refund(quote_id, payload, actor=actor)
         after['operations'] = service_desk_refresh_operations(wrapper['case']['id'])
     after['refunds'] = reconciliation.refund_followups(quote_id)
@@ -1440,6 +1491,10 @@ class Handler(BaseHTTPRequestHandler):
                 if SERVICE_DESK_RECEIPTS is None:
                     return self.payment_lab_send(503, {'error': '付款成功 LINE 通知尚未設定'})
                 return self.payment_lab_send(200, SERVICE_DESK_RECEIPTS.status())
+            if path == '/api/service-desk/refund-notices/state':
+                if SERVICE_DESK_REFUND_NOTICES is None:
+                    return self.payment_lab_send(503, {'error': '退款 LINE 通知尚未設定'})
+                return self.payment_lab_send(200, SERVICE_DESK_REFUND_NOTICES.status())
             if path == '/api/service-desk/operations/state':
                 if SERVICE_DESK_OPERATIONS is None:
                     return self.payment_lab_send(503, {'error': '內測派車門檻尚未設定'})
@@ -1480,11 +1535,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self.payment_lab_admin():
             return
         route = re.fullmatch(
-            r'/api/service-desk/(cases|quotes|orders)/([A-Za-z0-9-]{1,64})/(quote|notify|simulate|bind|line-test|reconcile|manual-match|refund-refresh|refund-close|dispatch|refund-action|receipt)', path)
+            r'/api/service-desk/(cases|quotes|orders)/([A-Za-z0-9-]{1,64})/(quote|notify|simulate|bind|line-test|reconcile|manual-match|refund-refresh|refund-close|dispatch|refund-action|receipt|refund-notice)', path)
         allowed = {('cases', 'quote'), ('quotes', 'notify'), ('quotes', 'simulate'),
                    ('orders', 'bind'), ('quotes', 'line-test'), ('quotes', 'reconcile'),
                    ('quotes', 'manual-match'), ('quotes', 'refund-refresh'), ('quotes', 'refund-close'),
-                   ('cases', 'dispatch'), ('cases', 'refund-action'), ('quotes', 'receipt')}
+                   ('cases', 'dispatch'), ('cases', 'refund-action'), ('quotes', 'receipt'),
+                   ('quotes', 'refund-notice')}
         if (path not in ('/api/service-desk/cases', '/api/service-desk/shopline/fetch',
                         '/api/service-desk/payment-sheet/prepare', '/api/service-desk/intake-invites')
                 and (not route or (route.group(1), route.group(3)) not in allowed)):
@@ -1538,6 +1594,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/service-desk/cases':
                 return self.payment_lab_send(201, service.create_case(data))
             identity, action = route.group(2), route.group(3)
+            if action == 'refund-notice':
+                if SERVICE_DESK_REFUND_NOTICES is None:
+                    return self.payment_lab_send(503, {'error': '退款 LINE 通知尚未設定'})
+                from shopline_preview import PreviewBusy
+                try:
+                    return self.payment_lab_send(200, service_desk_refund_notice(identity, data))
+                except PreviewBusy:
+                    return self.payment_lab_send(429, {'error': '請稍候再核對退款；本次未要求退款 LINE 通知'}, {'Retry-After': '30'})
             if action == 'receipt':
                 if SERVICE_DESK_RECEIPTS is None:
                     return self.payment_lab_send(503, {'error': '付款成功 LINE 通知尚未設定'})

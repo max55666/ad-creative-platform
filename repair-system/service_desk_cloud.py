@@ -432,6 +432,15 @@ def bootstrap(*, config=None, data_dir=DATA_DIRECTORY, seed_path=None, start_wor
             enabled=config.automation_enabled)
         receipts.init()
         server.SERVICE_DESK_RECEIPTS = receipts
+        from service_desk_refund_notices import ServiceDeskRefundNotices
+        refund_notices = ServiceDeskRefundNotices(server.service_desk_connect,
+            quote_reader=case_quote,
+            payment_reader=lambda cid: sync.preview()['rows'] if cid is None else next(iter(sync.preview(cid)['rows']), None),
+            sender=server.SERVICE_DESK_LINE_TEST_SENDER,
+            allowed_case_ids=server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES,
+            enabled=config.automation_enabled)
+        refund_notices.init()
+        server.SERVICE_DESK_REFUND_NOTICES = refund_notices
         runtime = Runtime(server, config)
         if config.sheet_endpoint:
             from payment_sheet_worker import PaymentSheetWorker
@@ -448,7 +457,7 @@ def bootstrap(*, config=None, data_dir=DATA_DIRECTORY, seed_path=None, start_wor
             enabled=config.automation_enabled)
         automation.init()
         server.SERVICE_DESK_AUTOMATION = automation
-        runtime.workers.extend((automation, receipts, BackupWorker(database)))
+        runtime.workers.extend((automation, receipts, refund_notices, BackupWorker(database)))
     with _bootstrap_stage('workers'):
         if start_workers:
             for worker in runtime.workers:

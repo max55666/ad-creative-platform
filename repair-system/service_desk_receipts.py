@@ -50,10 +50,15 @@ def _stamp(value):
 
 
 class ServiceDeskReceipts:
+    OUTBOX = 'wb_receipt_outbox'
+    META = 'wb_receipt_meta'
+    SEND_METHOD = 'send_receipt'
+    PAYMENT_STATUS = '已付款'
+
     def __init__(self, connection_factory, *, quote_reader, payment_reader, sender,
                  allowed_case_ids, enabled=False, clock=time.time, interval_seconds=5):
         if (not callable(connection_factory) or not callable(quote_reader) or not callable(payment_reader)
-                or not callable(getattr(sender, 'send_receipt', None)) or not callable(clock)
+                or not callable(getattr(sender, self.SEND_METHOD, None)) or not callable(clock)
                 or type(enabled) is not bool or type(interval_seconds) is not int
                 or not 1 <= interval_seconds <= 60):
             raise ValueError('內測付款確認通知的服務設定不正確')
@@ -64,6 +69,21 @@ class ServiceDeskReceipts:
         self._cycle = threading.Lock()
         self._stop, self._wake = threading.Event(), threading.Event()
         self._thread, self._db_key, self._last_error = None, None, ''
+
+    def _execute(self, connection, sql, parameters=()):
+        # Only trusted subclasses select one of these isolated wb_* ledgers.
+        if (self.OUTBOX, self.META) not in (('wb_receipt_outbox', 'wb_receipt_meta'),
+                ('wb_refund_notice_outbox', 'wb_refund_notice_meta')):
+            raise ValueError('內測確認通知資料表設定不正確')
+        return connection.execute(sql.replace('wb_receipt_outbox', self.OUTBOX)
+                                  .replace('wb_receipt_meta', self.META), parameters)
+
+    def _baseline_current(self, case_id):
+        return self._current(case_id)
+
+    @staticmethod
+    def _same_payload(current, saved):
+        return _json(current) == saved
 
     def _scope(self):
         values = self.scope_reader()
@@ -121,7 +141,7 @@ class ServiceDeskReceipts:
                 or case['caseNumber'] != quote.get('caseNumber')
                 or projection.get('caseId') != case_id or projection.get('caseNumber') != case['caseNumber']
                 or projection.get('name') != case['name'] or type(projection.get('quoteVersion')) is not int
-                or projection['quoteVersion'] != version or projection.get('paymentStatus') != '已付款'
+                or projection['quoteVersion'] != version or projection.get('paymentStatus') != self.PAYMENT_STATUS
                 or projection.get('source') not in ('shopline_api_completed', 'shopline_api_manual_completed')
                 or type(projection.get('amountDue')) is not int or projection['amountDue'] != total
                 or type(projection.get('amountPaid')) is not int or projection['amountPaid'] != total
@@ -137,7 +157,7 @@ class ServiceDeskReceipts:
 
     def init(self):
         with self._db(True) as c:
-            c.execute('''CREATE TABLE IF NOT EXISTS wb_receipt_outbox (
+            self._execute(c, '''CREATE TABLE IF NOT EXISTS wb_receipt_outbox (
                 id TEXT PRIMARY KEY,case_id TEXT NOT NULL,quote_id TEXT NOT NULL,
                 quote_version INTEGER NOT NULL,order_number TEXT NOT NULL UNIQUE,
                 request_id TEXT NOT NULL UNIQUE,payload TEXT NOT NULL,status TEXT NOT NULL,
@@ -146,31 +166,30 @@ class ServiceDeskReceipts:
                 last_error TEXT NOT NULL DEFAULT '',recipient_label TEXT NOT NULL DEFAULT '',
                 accepted_at REAL NOT NULL DEFAULT 0,created_at REAL NOT NULL,updated_at REAL NOT NULL,
                 UNIQUE(case_id,quote_id,order_number))''')
-            c.execute('CREATE TABLE IF NOT EXISTS wb_receipt_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+            self._execute(c, 'CREATE TABLE IF NOT EXISTS wb_receipt_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
             row = c.execute("SELECT file FROM pragma_database_list WHERE name='main'").fetchone()
-            self._db_key = os.path.normcase(os.path.realpath(row['file'])) if row and row['file'] else id(self.factory)
-            baseline = c.execute("SELECT 1 FROM wb_receipt_meta WHERE key='baseline_initialized'").fetchone()
+            self._db_key = (os.path.normcase(os.path.realpath(row['file'])) if row and row['file'] else id(self.factory), self.OUTBOX)
+            baseline = self._execute(c, "SELECT 1 FROM wb_receipt_meta WHERE key='baseline_initialized'").fetchone()
         if not baseline:
             rows = self.payment_reader(None)
             if type(rows) is not list or len(rows) > 1000:
                 raise ValueError('無法確認內測既有付款基準，未啟用付款確認通知')
             allowed, receipts = self._scope(), []
             for row in rows:
-                if type(row) is dict and row.get('caseId') in allowed and row.get('paymentStatus') == '已付款':
-                    receipt, reason = self._current(row['caseId'])
+                if type(row) is dict and row.get('caseId') in allowed and row.get('paymentStatus') == self.PAYMENT_STATUS:
+                    receipt, reason = self._baseline_current(row['caseId'])
                     if receipt is None:
                         raise ValueError('內測既有付款證據不完整，未啟用付款確認通知')
                     receipts.append(receipt)
             with self._db(True) as c:
-                if not c.execute("SELECT 1 FROM wb_receipt_meta WHERE key='baseline_initialized'").fetchone():
+                if not self._execute(c, "SELECT 1 FROM wb_receipt_meta WHERE key='baseline_initialized'").fetchone():
                     for receipt in receipts:
                         self._insert(c, receipt, 'baseline_skipped', self.clock())
-                    c.execute("INSERT INTO wb_receipt_meta VALUES('baseline_initialized','1')")
+                    self._execute(c, "INSERT INTO wb_receipt_meta VALUES('baseline_initialized','1')")
         return self.status()
 
-    @staticmethod
-    def _insert(c, receipt, status, now):
-        c.execute('''INSERT OR IGNORE INTO wb_receipt_outbox(id,case_id,quote_id,quote_version,
+    def _insert(self, c, receipt, status, now):
+        self._execute(c, '''INSERT OR IGNORE INTO wb_receipt_outbox(id,case_id,quote_id,quote_version,
             order_number,request_id,payload,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)''',
             ('WR-' + str(uuid.uuid4()), receipt['caseId'], receipt['id'], receipt['version'],
              receipt['orderNumber'], str(uuid.uuid4()), _json(receipt), status, now, now))
@@ -187,18 +206,19 @@ class ServiceDeskReceipts:
             return {**base, 'code': 'current_payment_unavailable'}
         with self._db(True) as c:
             if receipt is None:
-                c.execute("UPDATE wb_receipt_outbox SET status='cancelled',last_error=?,updated_at=? WHERE case_id=? AND status IN ('pending','retry','sending')",
+                self._execute(c, "UPDATE wb_receipt_outbox SET status='cancelled',last_error=?,updated_at=? WHERE case_id=? AND status IN ('pending','retry','sending')",
                           (reason, self.clock(), case_id))
                 return {**base, 'code': reason}
             base.update(quoteId=receipt['id'], orderNumber=receipt['orderNumber'])
-            c.execute("UPDATE wb_receipt_outbox SET status='cancelled',last_error='superseded_payment',updated_at=? WHERE case_id=? AND (quote_id<>? OR order_number<>?) AND status IN ('pending','retry','sending')",
+            self._execute(c, "UPDATE wb_receipt_outbox SET status='cancelled',last_error='superseded_payment',updated_at=? WHERE case_id=? AND (quote_id<>? OR order_number<>?) AND status IN ('pending','retry','sending')",
                       (self.clock(), case_id, receipt['id'], receipt['orderNumber']))
             self._insert(c, receipt, 'pending', self.clock())
-            row = c.execute('SELECT * FROM wb_receipt_outbox WHERE order_number=?', (receipt['orderNumber'],)).fetchone()
-            if (row['case_id'], row['quote_id'], row['payload']) != (case_id, receipt['id'], _json(receipt)):
+            row = self._execute(c, 'SELECT * FROM wb_receipt_outbox WHERE order_number=?', (receipt['orderNumber'],)).fetchone()
+            if ((row['case_id'], row['quote_id']) != (case_id, receipt['id'])
+                    or not self._same_payload(receipt, row['payload'])):
                 return {**base, 'code': 'payment_binding_conflict'}
             if row['status'] == 'baseline_skipped' and force:
-                c.execute("UPDATE wb_receipt_outbox SET status='pending',updated_at=? WHERE id=?", (self.clock(), row['id']))
+                self._execute(c, "UPDATE wb_receipt_outbox SET status='pending',updated_at=? WHERE id=?", (self.clock(), row['id']))
                 return {**base, 'queued': True, 'code': 'queued'}
             code = ('already_accepted' if row['status'] == 'accepted' else 'already_queued' if row['status'] in _ACTIVE
                     else row['status'])
@@ -206,7 +226,7 @@ class ServiceDeskReceipts:
 
     def status(self):
         with self._db() as c:
-            rows = c.execute('SELECT * FROM wb_receipt_outbox ORDER BY rowid DESC LIMIT 100').fetchall()
+            rows = self._execute(c, 'SELECT * FROM wb_receipt_outbox ORDER BY rowid DESC LIMIT 100').fetchall()
         running = bool(self._thread and self._thread.is_alive() and not self._stop.is_set())
         return {**FLAGS, 'configured': True, 'enabled': self.enabled, 'running': running,
             'lastError': self._last_error, 'quotes': [{'caseId': row['case_id'], 'quoteId': row['quote_id'],
@@ -216,7 +236,7 @@ class ServiceDeskReceipts:
 
     def _cancel(self, row, reason):
         with self._db(True) as c:
-            c.execute("UPDATE wb_receipt_outbox SET status='cancelled',last_error=?,updated_at=? WHERE id=? AND status IN ('pending','retry','sending')",
+            self._execute(c, "UPDATE wb_receipt_outbox SET status='cancelled',last_error=?,updated_at=? WHERE id=? AND status IN ('pending','retry','sending')",
                       (reason, self.clock(), row['id']))
 
     def run_once(self):
@@ -225,39 +245,39 @@ class ServiceDeskReceipts:
         try:
             now = self.clock()
             with self._db() as c:
-                row = c.execute("SELECT * FROM wb_receipt_outbox WHERE status IN ('pending','retry','sending') AND next_attempt<=? ORDER BY rowid LIMIT 1", (now,)).fetchone()
+                row = self._execute(c, "SELECT * FROM wb_receipt_outbox WHERE status IN ('pending','retry','sending') AND next_attempt<=? ORDER BY rowid LIMIT 1", (now,)).fetchone()
             if row is None:
                 return {**FLAGS, 'processed': False}
             try:
                 current, reason = self._current(row['case_id'])
-                valid = current is not None and _json(current) == row['payload']
+                valid = current is not None and self._same_payload(current, row['payload'])
             except Exception:
                 with self._db(True) as c:
-                    c.execute("UPDATE wb_receipt_outbox SET status='retry',last_error='current_payment_unavailable',next_attempt=?,updated_at=? WHERE id=? AND status IN ('pending','retry','sending')",
+                    self._execute(c, "UPDATE wb_receipt_outbox SET status='retry',last_error='current_payment_unavailable',next_attempt=?,updated_at=? WHERE id=? AND status IN ('pending','retry','sending')",
                               (now + 60, now, row['id']))
                 return {**FLAGS, 'processed': True, 'deferred': True}
             if not valid:
                 self._cancel(row, reason or 'superseded_payment')
                 return {**FLAGS, 'processed': True, 'cancelled': True}
             with self._db(True) as c:
-                fresh = c.execute('SELECT * FROM wb_receipt_outbox WHERE id=?', (row['id'],)).fetchone()
+                fresh = self._execute(c, 'SELECT * FROM wb_receipt_outbox WHERE id=?', (row['id'],)).fetchone()
                 if fresh['status'] not in _ACTIVE or fresh['next_attempt'] > now:
                     return {**FLAGS, 'processed': False}
                 if (fresh['attempts'] >= MAX_ATTEMPTS or (fresh['attempts'] and now - fresh['first_attempt'] >= RETRY_WINDOW)):
-                    c.execute("UPDATE wb_receipt_outbox SET status='needs_review',last_error='retry_expired',updated_at=? WHERE id=?", (now, row['id']))
+                    self._execute(c, "UPDATE wb_receipt_outbox SET status='needs_review',last_error='retry_expired',updated_at=? WHERE id=?", (now, row['id']))
                     return {**FLAGS, 'processed': True}
                 first = fresh['first_attempt'] if fresh['attempts'] else now
                 attempt = fresh['attempts'] + 1
-                c.execute("UPDATE wb_receipt_outbox SET status='sending',attempts=?,first_attempt=?,last_attempt=?,next_attempt=?,updated_at=? WHERE id=?",
+                self._execute(c, "UPDATE wb_receipt_outbox SET status='sending',attempts=?,first_attempt=?,last_attempt=?,next_attempt=?,updated_at=? WHERE id=?",
                           (attempt, first, now, now + 60, now, row['id']))
             # Re-check after the durable claim. No SQLite transaction is held
             # while the sender resolves identity or performs the provider call.
             try:
                 current, reason = self._current(row['case_id'])
-                if current is None or _json(current) != row['payload']:
+                if current is None or not self._same_payload(current, row['payload']):
                     self._cancel(row, reason or 'superseded_payment')
                     return {**FLAGS, 'processed': True, 'cancelled': True}
-                result = self.sender.send_receipt(current, row['request_id'])
+                result = getattr(self.sender, self.SEND_METHOD)(current, row['request_id'])
                 if (type(result) is not dict or any(result.get(key) is not value for key, value in
                         (('internalOnly', True), ('realPayment', False), ('releaseAllowed', False)))):
                     raise ValueError()
@@ -275,7 +295,7 @@ class ServiceDeskReceipts:
             except Exception:
                 accepted, retry, label, error = False, True, '', 'network_unknown'
             with self._db(True) as c:
-                c.execute('''UPDATE wb_receipt_outbox SET status=?,last_error=?,recipient_label=?,
+                self._execute(c, '''UPDATE wb_receipt_outbox SET status=?,last_error=?,recipient_label=?,
                     accepted_at=?,next_attempt=?,updated_at=? WHERE id=? AND status='sending' ''',
                     ('accepted' if accepted else 'retry' if retry else 'failed', error, label,
                      now if accepted else 0, now + min(1800, 60 * 2 ** min(attempt - 1, 5)), now, row['id']))

@@ -84,6 +84,29 @@ class _ReceiptBoundSender(_BoundSender):
         return result
 
 
+class _RefundBoundSender(_ReceiptBoundSender):
+    """Full-refund notice; provider progress stays in the server audit."""
+    def _payload(self, receipt):
+        if (type(receipt) is not dict or receipt.get('source') != 'shopline_api_refund'
+                or receipt.get('providerStatus') not in ('refunding', 'refunded')):
+            raise ValueError('退款通知僅接受平台退款中或退款完成的全額退款')
+        normalized = {key: value for key, value in receipt.items() if key != 'providerStatus'}
+        normalized['source'] = 'shopline_api_completed'
+        quote_id, _ = super()._payload(normalized)
+        text = ('【內部測試｜退款通知】\n維修編號：' + receipt['caseNumber']
+            + '\n付款訂單編號：' + receipt['orderNumber']
+            + '\n退款金額：NT$' + format(receipt['total'], ',')
+            + '\n此筆維修付款已取消，已辦理退款。')
+        _safe_text(text, 1000, True)
+        return quote_id, {'to': self._allowed_user_id,
+            'messages': [{'type': 'text', 'text': text}]}
+
+    def _result(self, *args, **kwargs):
+        result = super()._result(*args, **kwargs)
+        result['notificationKind'] = 'refund_notice'
+        return result
+
+
 class CaseBoundTestSender:
     def __init__(self, *, token, recipient_resolver, opener=None, clock=time.monotonic):
         if not callable(recipient_resolver) or not callable(clock) or (opener is not None and not callable(opener)):
@@ -91,9 +114,11 @@ class CaseBoundTestSender:
         self.token, self.resolve, self.opener = token, recipient_resolver, opener
         self.lock, self.senders = threading.Lock(), {}
         self.receipt_senders = {}
+        self.refund_senders = {}
         self.clock, self.last_attempt = clock, None
         self.requests, self.quote_targets = {}, {}
         self.quote_identities, self.quote_fingerprints = {}, {}
+        self.refund_order_bindings, self.refund_order_accepted = {}, {}
 
     def status(self):
         configured = _token_valid(self.token)
@@ -127,6 +152,9 @@ class CaseBoundTestSender:
     def send_receipt(self, receipt, request_id):
         return self._send('receipt', receipt, request_id)
 
+    def send_refund_notice(self, receipt, request_id):
+        return self._send('refund', receipt, request_id)
+
     def _send(self, kind, quote, request_id):
         try:
             _uuid4(request_id)
@@ -136,8 +164,11 @@ class CaseBoundTestSender:
             if not self.lock.acquire(blocking=False):
                 return self._blocked('send_busy', True)
             try:
-                senders = self.senders if kind == 'notice' else self.receipt_senders
-                sender_class = _BoundSender if kind == 'notice' else _ReceiptBoundSender
+                senders, sender_class = {
+                    'notice': (self.senders, _BoundSender),
+                    'receipt': (self.receipt_senders, _ReceiptBoundSender),
+                    'refund': (self.refund_senders, _RefundBoundSender),
+                }[kind]
                 if key not in senders:
                     if len(senders) >= 100:
                         return self._blocked('session_limit')
@@ -151,6 +182,11 @@ class CaseBoundTestSender:
                 fingerprint_input = {'quote': immutable, 'payload': payload}
                 if kind == 'receipt':
                     fingerprint_input['receipt'] = quote
+                if kind == 'refund':
+                    # Provider refunding -> refunded changes raw audit facts,
+                    # not this full-refund notice or its original retry key.
+                    fingerprint_input['refund'] = {field: value for field, value in quote.items()
+                                                   if field != 'providerStatus'}
                 fingerprint = hashlib.sha256(_json(fingerprint_input)).hexdigest()
                 identity = hashlib.sha256(_json(immutable)).hexdigest()
                 prior = self.requests.get(request_id)
@@ -164,6 +200,16 @@ class CaseBoundTestSender:
                     return self._blocked('quote_changed')
                 if not prior and len(self.requests) >= MAX_REQUESTS:
                     return self._blocked('session_limit')
+                if kind == 'refund':
+                    order = quote['orderNumber']
+                    binding = (quote_id, uid, fingerprint)
+                    if self.refund_order_bindings.get(order, binding) != binding:
+                        return self._blocked('refund_order_conflict')
+                    if order in self.refund_order_accepted:
+                        result = sender._result('duplicate', 'already_accepted',
+                            'LINE API 已接受此筆訂單的退款通知，未重複傳送。', request_id, quote_id)
+                        self.requests[request_id] = (kind, quote_id, uid, fingerprint, 'accepted')
+                        return result
                 now = self.clock()
                 if (not (prior and prior[4] == 'accepted') and self.last_attempt is not None
                         and now - self.last_attempt < GLOBAL_COOLDOWN):
@@ -171,10 +217,14 @@ class CaseBoundTestSender:
                 self.quote_targets[quote_id] = uid
                 self.quote_identities[quote_id] = identity
                 self.quote_fingerprints[(kind, quote_id)] = fingerprint
+                if kind == 'refund':
+                    self.refund_order_bindings[quote['orderNumber']] = (quote_id, uid, fingerprint)
                 previous_attempt = sender._last_attempt
                 result = sender.send(quote, request_id)
                 self.requests[request_id] = (kind, quote_id, uid, fingerprint,
                                             'accepted' if result.get('state') in ('accepted', 'duplicate') else result.get('state'))
+                if kind == 'refund' and result.get('state') in ('accepted', 'duplicate'):
+                    self.refund_order_accepted[quote['orderNumber']] = True
                 if sender._last_attempt != previous_attempt:
                     self.last_attempt = now
                 return result

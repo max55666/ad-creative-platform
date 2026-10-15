@@ -210,16 +210,22 @@ class PaymentSheetSync:
                     if check['row']['order_number'] == order_number
                     and check['row']['order_id'] == success['row']['order_id']), success)
                 if latest_same['facts'].get('providerPaymentStatus') in _REFUNDS:
-                    status = '退款需處理'
+                    status = ('已退款' if latest_same['facts']['providerPaymentStatus'] in ('refunding', 'refunded')
+                              else '退款需處理')
                 elif (latest_same['facts'].get('providerPaymentStatus') != 'completed'
                       or not self._success(latest_same, due)):
                     status, paid = '需人工核對', 0
                 followups = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_refund_followups'").fetchone()
-                if followups and c.execute('SELECT 1 FROM wb_refund_followups WHERE quote_id=? AND order_id=? AND order_number=?',
-                        (quote['id'], success['row']['order_id'], order_number)).fetchone():
+                refund = c.execute('SELECT provider_status FROM wb_refund_followups WHERE quote_id=? AND order_id=? AND order_number=?',
+                    (quote['id'], success['row']['order_id'], order_number)).fetchone() if followups else None
+                if refund:
                     # A later provider flip cannot silently clear a recorded
                     # refund hold, including an administratively closed refund.
-                    status, paid = '退款需處理', due
+                    # Company policy treats provider refunding as operationally
+                    # refunded. Keep the actual provider state in its ledger;
+                    # this label never manufactures a bank completion time.
+                    status, paid = ('已退款' if refund['provider_status'] in ('refunding', 'refunded')
+                                    else '退款需處理'), due
             elif due and (row['status'] in ('needs_review', 'simulated_paid')
                           or quote['payment_status'] in ('needs_review', 'simulated_paid')
                           or quote['accepted_order_id']):

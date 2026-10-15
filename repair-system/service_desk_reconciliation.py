@@ -449,7 +449,11 @@ class RealOrderReconciliation:
                         VALUES(?,?,?,?,?,?,'open',?,?)''',
                         (quote_id, case_id, identity, number, provider_status, check_id, now, now))
                 else:
-                    reopen = previous_refund['provider_status'] != provider_status
+                    # Refunding and refunded are the same operational outcome
+                    # under the company's rule. Natural provider completion
+                    # keeps an administrative closure; partial refunds reopen.
+                    reopen = (previous_refund['provider_status'] != provider_status
+                        and not {previous_refund['provider_status'], provider_status} <= {'refunding', 'refunded'})
                     c.execute('''UPDATE wb_refund_followups SET provider_status=?,observation_check_id=?,
                         status=?,updated_at=? WHERE quote_id=?''',
                         (provider_status, check_id, 'open' if reopen else previous_refund['status'], now, quote_id))
@@ -514,8 +518,10 @@ class RealOrderReconciliation:
                 order_id=? AND order_number=? ORDER BY rowid DESC LIMIT 1''',
                 (quote_id, row['order_id'], row['order_number'])).fetchone()
             facts = json.loads(check['response'])['result']['facts'] if check else {}
-            if row['provider_status'] != 'refunded' or facts.get('providerPaymentStatus') != 'refunded' or facts.get('freshProviderLookup') is not True:
-                raise ValueError('SHOPLINE 尚未回報此筆訂單全額退款完成，不能結案')
+            if (row['provider_status'] not in ('refunding', 'refunded')
+                    or facts.get('providerPaymentStatus') not in ('refunding', 'refunded')
+                    or facts.get('freshProviderLookup') is not True):
+                raise ValueError('SHOPLINE 尚未回報此筆訂單退款中或已退款，不能結案')
             if row['status'] == 'closed':
                 if row['close_request_id'] == request_id and row['closed_by'] == actor.strip() and row['resolution_reason'] == reason.strip():
                     return {**FLAGS, 'closed': True, 'quoteId': quote_id, 'idempotent': True}
