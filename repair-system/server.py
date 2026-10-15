@@ -70,9 +70,48 @@ def connect():
     try:
         with c: yield c
     finally: c.close()
+
+def seed_case_number_sequences(c,day=None):
+    """Raise durable daily watermarks from existing/deleted IDs; never lower."""
+    query='SELECT id FROM cases UNION ALL SELECT case_id AS id FROM deleted_case_requests'
+    args=()
+    if day is not None:
+        prefix='R'+day+'-%'
+        query='SELECT id FROM cases WHERE id LIKE ? UNION ALL SELECT case_id AS id FROM deleted_case_requests WHERE case_id LIKE ?'
+        args=(prefix,prefix)
+    maxima={}
+    for row in c.execute(query,args):
+        match=re.fullmatch(r'R([0-9]{8})-([0-9]{4,})',row['id'])
+        if match:
+            number=int(match[2])
+            maxima[match[1]]=max(maxima.get(match[1],0),number)
+    for date,number in maxima.items():
+        c.execute('''INSERT INTO case_number_sequences(day,last_number) VALUES(?,?)
+            ON CONFLICT(day) DO UPDATE SET last_number=excluded.last_number
+            WHERE excluded.last_number>case_number_sequences.last_number''',(date,number))
+
+def next_case_number(c,day):
+    """Allocate inside the same BEGIN IMMEDIATE transaction as case insertion."""
+    if not c.in_transaction or not isinstance(day,str) or not re.fullmatch(r'[0-9]{8}',day):
+        raise ValueError('案件編號必須在申請交易中產生')
+    # Also tolerate a reviewed import made after process startup.
+    seed_case_number_sequences(c,day)
+    c.execute('INSERT OR IGNORE INTO case_number_sequences(day,last_number) VALUES(?,0)',(day,))
+    c.execute('UPDATE case_number_sequences SET last_number=last_number+1 WHERE day=?',(day,))
+    number=c.execute('SELECT last_number FROM case_number_sequences WHERE day=?',(day,)).fetchone()[0]
+    return 'R'+day+'-'+str(number).zfill(4)
+
 def init_db():
     with connect() as c:
+        c.execute('BEGIN IMMEDIATE')
         c.execute('CREATE TABLE IF NOT EXISTS cases (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, request_id TEXT NOT NULL, data TEXT NOT NULL, status TEXT NOT NULL, created TEXT NOT NULL, history TEXT NOT NULL, note TEXT NOT NULL DEFAULT "", notification TEXT NOT NULL DEFAULT "未傳送", UNIQUE(user_id, request_id))')
+        c.execute('''CREATE TABLE IF NOT EXISTS deleted_case_requests (
+            user_id TEXT NOT NULL,request_id TEXT NOT NULL,case_id TEXT NOT NULL,deleted_at TEXT NOT NULL,
+            PRIMARY KEY(user_id,request_id))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS case_number_sequences (
+            day TEXT PRIMARY KEY,last_number INTEGER NOT NULL
+            CHECK(typeof(last_number)='integer' AND last_number>=0))''')
+        seed_case_number_sequences(c)
         columns=[row['name'] for row in c.execute('PRAGMA table_info(cases)')]
         if 'cloud_revision' not in columns: c.execute('ALTER TABLE cases ADD COLUMN cloud_revision INTEGER NOT NULL DEFAULT 0')
         if 'line_display_name' not in columns: c.execute('ALTER TABLE cases ADD COLUMN line_display_name TEXT NOT NULL DEFAULT ""')
@@ -1312,13 +1351,14 @@ class Handler(BaseHTTPRequestHandler):
             clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-14-v3'})
             if PAYMENTS is not None and PAYMENTS.new_cases_enabled is True:
                 clean['paymentWorkflow']=PAYMENT_WORKFLOW
-            now=time.strftime('%Y-%m-%d %H:%M:%S'); prefix='R'+time.strftime('%Y%m%d')+'-'
+            now=time.strftime('%Y-%m-%d %H:%M:%S'); day=time.strftime('%Y%m%d')
             with connect() as c:
                 c.execute('BEGIN IMMEDIATE')
                 old=c.execute('SELECT * FROM cases WHERE user_id=? AND request_id=?',(u['id'],rid)).fetchone()
                 if old: return self.send(200,{'case':self.case_dict(old)})
-                n=c.execute('SELECT COUNT(*) FROM cases WHERE id LIKE ?',(prefix+'%',)).fetchone()[0]+1
-                ident=prefix+str(n).zfill(4)
+                if c.execute('SELECT 1 FROM deleted_case_requests WHERE user_id=? AND request_id=?',(u['id'],rid)).fetchone():
+                    return self.send(409,{'error':'此測試申請已清理，請重新開啟表單後再送出。','code':'case_cleaned'})
+                ident=next_case_number(c,day)
                 history=json.dumps([{'time':now,'status':'已申請','by':'客戶'}],ensure_ascii=False)
                 c.execute('INSERT INTO cases(id,user_id,request_id,data,status,created,history,line_display_name) VALUES(?,?,?,?,?,?,?,?)',(ident,u['id'],rid,json.dumps(clean,ensure_ascii=False),'已申請',now,history,trusted_display_name(u.get('displayName'))))
                 enqueue_cloud_case(c,ident)

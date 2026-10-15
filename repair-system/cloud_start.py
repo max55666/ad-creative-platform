@@ -35,6 +35,10 @@ def main():
         data_dir = Path(os.environ['REPAIR_DATA_DIR'])
         bootstrap_from_secret_files(data_dir)
         import_on_start(data_dir)
+        # Explicit operator-only maintenance runs before any request or worker.
+        # With no reviewed approval marker this performs no database operations.
+        from test_case_cleanup import run_on_start
+        run_on_start(data_dir)
     except Exception:
         raise SystemExit('Cloud setup or data import failed; existing data was preserved. Operator review required.') from None
     args = [sys.executable, '-m', 'gunicorn',
