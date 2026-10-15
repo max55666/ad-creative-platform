@@ -580,8 +580,19 @@ def _intake_request(current, path, query, method, headers, body, start_response,
             raise RequestRejected(400)
         try:
             parameters = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=8)
-            if (set(parameters) - {'code', 'state', 'error', 'error_description', 'friendship_status_changed', 'scope'}
-                    or any(len(v) != 1 for v in parameters.values()) or 'error' in parameters):
+            if 'error' in parameters:
+                provider_code = parameters['error'][0].lower()
+                known_errors = {'access_denied', 'invalid_request', 'unauthorized_client',
+                    'server_error', 'temporarily_unavailable', 'login_required',
+                    'interaction_required', 'consent_required', 'unsupported_response_type', 'invalid_scope'}
+                label = provider_code if provider_code in known_errors else 'other_provider_error'
+                logging.getLogger('petpivot.internal.intake').warning(
+                    'internal_test_intake_failure stage=callback_provider_%s', label)
+                raise ValueError()
+            # RFC 6749 section 4.1.2: ignore extension response parameters.
+            # Only the validated code/state participate in authentication;
+            # unknown fields never become an identity or redirect target.
+            if any(len(parameters.get(key, [])) != 1 for key in ('code', 'state')):
                 logging.getLogger('petpivot.internal.intake').warning(
                     'internal_test_intake_failure stage=callback_parameters')
                 raise ValueError()
