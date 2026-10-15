@@ -8,13 +8,14 @@ unreachable from this adapter.
 import atexit
 import base64
 import binascii
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import Message
 from http import HTTPStatus
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -44,6 +45,76 @@ _HOP_HEADERS = {'connection', 'keep-alive', 'proxy-authenticate',
 MAX_BODY_BYTES = 16384
 _BOOT_LOCK = threading.Lock()
 _BOOT_RUNTIME = None
+_BOOT_LOG_LOCK = threading.Lock()
+_BOOT_LOG_NEXT = 0.0
+_BOOT_LOG_COUNT = 0
+_BOOT_STAGES = frozenset({'config', 'seed', 'server', 'adapters', 'workers'})
+
+
+def _error_kind(error):
+    # Never use exception text, repr, arbitrary class names, paths or traceback.
+    for kind in (FileNotFoundError, PermissionError, sqlite3.DatabaseError,
+                 ModuleNotFoundError, ImportError, ValueError, TypeError,
+                 KeyError, OSError, RuntimeError):
+        if isinstance(error, kind):
+            return kind.__name__
+    return 'Exception'
+
+
+class BootstrapFailure(RuntimeError):
+    def __init__(self, stage, error):
+        self.stage = stage if stage in _BOOT_STAGES else 'runtime'
+        self.error_kind = _error_kind(error)
+        super().__init__('Independent cloud bootstrap failed')
+
+
+@contextmanager
+def _bootstrap_stage(stage):
+    try:
+        yield
+    except BootstrapFailure:
+        raise
+    except Exception as error:
+        raise BootstrapFailure(stage, error) from None
+
+
+def _report_bootstrap_failure(error):
+    """One static, secret-free signal per minute, at most ten per process."""
+    global _BOOT_LOG_NEXT, _BOOT_LOG_COUNT
+    now = time.monotonic()
+    with _BOOT_LOG_LOCK:
+        if _BOOT_LOG_COUNT >= 10 or now < _BOOT_LOG_NEXT:
+            return
+        _BOOT_LOG_NEXT, _BOOT_LOG_COUNT = now + 60, _BOOT_LOG_COUNT + 1
+    stage = error.stage if isinstance(error, BootstrapFailure) and error.stage in _BOOT_STAGES else 'runtime'
+    kind = error.error_kind if isinstance(error, BootstrapFailure) else _error_kind(error)
+    if kind not in {'FileNotFoundError', 'PermissionError', 'DatabaseError',
+                    'ModuleNotFoundError', 'ImportError', 'ValueError', 'TypeError',
+                    'KeyError', 'OSError', 'RuntimeError', 'Exception'}:
+        kind = 'Exception'
+    flags = _default_secret_diagnostics(stage)
+    logging.getLogger('petpivot.internal.bootstrap').warning(
+        'internal_cloud_bootstrap_failure stage=%s error_type=%s '
+        'default_secret_exists=%s default_secret_symlink=%s '
+        'default_secret_regular=%s default_secret_within_root=%s',
+        stage, kind, flags['exists'], flags['symlink'], flags['regular'], flags['within_root'])
+
+
+def _default_secret_diagnostics(stage):
+    """Only filesystem booleans for a fixed platform path; never read content."""
+    flags = {key: 'not_checked' for key in ('exists', 'symlink', 'regular', 'within_root')}
+    filename = {'config': 'service-desk-config.json', 'seed': 'service-desk-seed.b64'}.get(stage)
+    if filename is None:
+        return flags
+    path = _RENDER_SECRET_ROOT / filename
+    probes = {'exists': path.exists, 'symlink': path.is_symlink, 'regular': path.is_file,
+        'within_root': lambda: path.resolve(strict=True).is_relative_to(_RENDER_SECRET_ROOT.resolve(strict=True))}
+    for key, probe in probes.items():
+        try:
+            flags[key] = int(bool(probe()))
+        except Exception:
+            flags[key] = 'unknown'
+    return flags
 
 
 def _fail():
@@ -287,58 +358,63 @@ class Runtime:
 
 def bootstrap(*, config=None, data_dir=DATA_DIRECTORY, seed_path=None, start_workers=True):
     """Called inside one non-preloaded Gunicorn worker, never by production."""
-    config = config or Configuration.load()
-    if not isinstance(config, Configuration):
-        _fail()
-    database = prepare_database(data_dir, seed_path)
-    # No provider credentials are put in the formal repair environment.
-    for name in list(os.environ):
-        if name.startswith(('REPAIR_', 'LINE_', 'GOOGLE_', 'SHOPLINE_')):
-            os.environ.pop(name)
-    os.environ.update({'REPAIR_DEPLOYMENT': 'cloud', 'REPAIR_MODE': 'demo',
-        'REPAIR_LOCAL_SETUP': '0', 'REPAIR_PAYMENT_LAB': '1', 'REPAIR_SERVICE_DESK': '1',
-        'REPAIR_SERVICE_DESK_ISOLATED_IMPORT': '1',
-        'REPAIR_DATA_DIR': str(database.parent), 'PUBLIC_URL': config.public_url,
-        'REPAIR_ADMIN_PASSWORD': config.admin_password})
-    import server
-    if (server.DATA_DIR != database.parent.resolve() or server.PRIVATE
-            or server.TOKEN or server.SECRET or server.MESSAGE_SECRET or not server.DEMO):
-        _fail()
-    server.SERVICE_DESK_CLOUD_INTERNAL = True
-    server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES = frozenset({APPROVED_CASE_ID})
-    from shopline_preview import ShoplinePreview
-    from shopline_orders import fetch_repair_orders
-    from line_test_sender import LineTestSender
-    desk = server.service_desk_service()
-    server.SERVICE_DESK_ORDER_PREVIEW = ShoplinePreview(lambda: config.shopline_token,
-        lambda: desk.state()['cases'], fetch_repair_orders)
-    server.SERVICE_DESK_LINE_TEST_SENDER = LineTestSender(token=config.line_token,
-        allowed_user_id=config.line_user, recipient_label='Max🚀', allow_actual_test=bool(config.line_token))
-    server.SERVICE_DESK_PAYMENT_SHEET_TARGET = {'sheetId': TEST_SHEET_ID,
-        'url': 'https://docs.google.com/spreadsheets/d/' + TEST_SHEET_ID + '/edit#gid=515406948'}
-    server.service_desk_reconciliation_service()
-    sync = server.service_desk_payment_sheet_service()
-    runtime = Runtime(server, config)
-    if config.sheet_endpoint:
-        from payment_sheet_worker import PaymentSheetWorker
-        worker = PaymentSheetWorker(sync, endpoint=config.sheet_endpoint,
-            secret=config.sheet_secret, sheet_id=TEST_SHEET_ID,
-            allowed_case_ids=server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES)
-        server.SERVICE_DESK_PAYMENT_SHEET_WORKER = worker
-        runtime.workers.append(worker)
-    from service_desk_automation import ServiceDeskAutomation
-    automation = ServiceDeskAutomation(server.service_desk_connect, quote_reader=desk.get_quote,
-        line_sender=server.SERVICE_DESK_LINE_TEST_SENDER,
-        order_provider=server.SERVICE_DESK_ORDER_PREVIEW, reconcile=server.service_desk_reconcile,
-        allowed_case_ids=server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES,
-        enabled=config.automation_enabled)
-    automation.init()
-    server.SERVICE_DESK_AUTOMATION = automation
-    runtime.workers.extend((automation, BackupWorker(database)))
-    if start_workers:
-        for worker in runtime.workers:
-            worker.start()
-        atexit.register(runtime.stop)
+    with _bootstrap_stage('config'):
+        config = config or Configuration.load()
+        if not isinstance(config, Configuration):
+            _fail()
+    with _bootstrap_stage('seed'):
+        database = prepare_database(data_dir, seed_path)
+    with _bootstrap_stage('server'):
+        # No provider credentials are put in the formal repair environment.
+        for name in list(os.environ):
+            if name.startswith(('REPAIR_', 'LINE_', 'GOOGLE_', 'SHOPLINE_')):
+                os.environ.pop(name)
+        os.environ.update({'REPAIR_DEPLOYMENT': 'cloud', 'REPAIR_MODE': 'demo',
+            'REPAIR_LOCAL_SETUP': '0', 'REPAIR_PAYMENT_LAB': '1', 'REPAIR_SERVICE_DESK': '1',
+            'REPAIR_SERVICE_DESK_ISOLATED_IMPORT': '1',
+            'REPAIR_DATA_DIR': str(database.parent), 'PUBLIC_URL': config.public_url,
+            'REPAIR_ADMIN_PASSWORD': config.admin_password})
+        import server
+        if (server.DATA_DIR != database.parent.resolve() or server.PRIVATE
+                or server.TOKEN or server.SECRET or server.MESSAGE_SECRET or not server.DEMO):
+            _fail()
+        server.SERVICE_DESK_CLOUD_INTERNAL = True
+        server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES = frozenset({APPROVED_CASE_ID})
+    with _bootstrap_stage('adapters'):
+        from shopline_preview import ShoplinePreview
+        from shopline_orders import fetch_repair_orders
+        from line_test_sender import LineTestSender
+        desk = server.service_desk_service()
+        server.SERVICE_DESK_ORDER_PREVIEW = ShoplinePreview(lambda: config.shopline_token,
+            lambda: desk.state()['cases'], fetch_repair_orders)
+        server.SERVICE_DESK_LINE_TEST_SENDER = LineTestSender(token=config.line_token,
+            allowed_user_id=config.line_user, recipient_label='Max🚀', allow_actual_test=bool(config.line_token))
+        server.SERVICE_DESK_PAYMENT_SHEET_TARGET = {'sheetId': TEST_SHEET_ID,
+            'url': 'https://docs.google.com/spreadsheets/d/' + TEST_SHEET_ID + '/edit#gid=515406948'}
+        server.service_desk_reconciliation_service()
+        sync = server.service_desk_payment_sheet_service()
+        runtime = Runtime(server, config)
+        if config.sheet_endpoint:
+            from payment_sheet_worker import PaymentSheetWorker
+            worker = PaymentSheetWorker(sync, endpoint=config.sheet_endpoint,
+                secret=config.sheet_secret, sheet_id=TEST_SHEET_ID,
+                allowed_case_ids=server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES)
+            server.SERVICE_DESK_PAYMENT_SHEET_WORKER = worker
+            runtime.workers.append(worker)
+        from service_desk_automation import ServiceDeskAutomation
+        automation = ServiceDeskAutomation(server.service_desk_connect, quote_reader=desk.get_quote,
+            line_sender=server.SERVICE_DESK_LINE_TEST_SENDER,
+            order_provider=server.SERVICE_DESK_ORDER_PREVIEW, reconcile=server.service_desk_reconcile,
+            allowed_case_ids=server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES,
+            enabled=config.automation_enabled)
+        automation.init()
+        server.SERVICE_DESK_AUTOMATION = automation
+        runtime.workers.extend((automation, BackupWorker(database)))
+    with _bootstrap_stage('workers'):
+        if start_workers:
+            for worker in runtime.workers:
+                worker.start()
+            atexit.register(runtime.stop)
     return runtime
 
 
@@ -381,7 +457,9 @@ def _body(environ, headers):
     length = int(raw) if raw else 0
     if length > MAX_BODY_BYTES:
         raise RequestRejected(413)
-    if headers.get('Transfer-Encoding') or environ.get('wsgi.input_terminated'):
+    # Gunicorn 26 marks every parsed request input_terminated, including framed
+    # Content-Length requests. It is not evidence of chunked transfer encoding.
+    if headers.get('Transfer-Encoding'):
         raise RequestRejected(400)
     source = environ.get('wsgi.input')
     data = source.read(length) if length and source is not None else b''
@@ -442,7 +520,11 @@ def create_app(runtime=None, runtime_factory=bootstrap):
                 raise RequestRejected(403)
             with lock:
                 if holder[0] is None:
-                    holder[0] = runtime_factory()
+                    try:
+                        holder[0] = runtime_factory()
+                    except Exception as error:
+                        _report_bootstrap_failure(error)
+                        raise
                 current = holder[0]
             if not health_probe and headers.get_all('Host', []) != [urlsplit(current.config.public_url).netloc]:
                 raise RequestRejected(403)
