@@ -31,6 +31,32 @@ CASE = re.compile(r'R[0-9]{8}-[0-9]{4,8}\Z')
 QUOTE = re.compile(r'WQ-[0-9a-f-]{36}\Z')
 ORDER = re.compile(r'[A-Za-z0-9_-]{1,64}\Z')
 SHEET_URL = 'https://docs.google.com/spreadsheets/d/1C5gGI4cL4lgw-GqSXRcQuicM2e5FvDHp-bnfqpMcnqI/edit'
+CHECK_REASONS = {
+    'invalid_provenance': '未取得本次伺服器重新查詢的訂單，請重新核對。',
+    'invalid_order': '訂單欄位不完整或格式不正確。',
+    'invalid_quote': '找不到有效的核定金額。',
+    'stale_quote_snapshot': '案件或核定資料已異動，請重新整理後核對。',
+    'not_snapshot': '訂單未連結至有效的維修案件。',
+    'superseded_quote': '此為舊版報價，不能套用至目前核定金額。',
+    'quote_not_awaiting_payment': '此報價目前不接受新的付款配對。',
+    'no_payment_required': '此案核定免付款，不應配對付費訂單。',
+    'invalid_currency': '訂單或核定金額不是新臺幣。',
+    'amount_mismatch': '付款訂單總額與目前核定金額不一致。',
+    'invalid_product': '商品、數量或金額組成不符合維修費用一元商品規則。',
+    'provider_review_required': '商城回傳的訂單欄位需要客服確認。',
+    'not_completed': '商城尚未回報此訂單付款完成。',
+    'refunded': '此訂單已有退款相關狀態，不能作為可用付款。',
+    'untrusted_payment_assertion': '訂單的付款驗證資料不符合目前核對規則。',
+    'invalid_order_time': '缺少有效的訂單或報價時間。',
+    'order_predates_quote': '付款訂單建立時間早於本次核定報價。',
+    'missing_remark': '訂單備註缺少「送修編號」或「申請人姓名」。',
+    'conflicting_remark': '訂單備註含有多筆或互相衝突的案件資料。',
+    'case_mismatch': '備註的送修編號與本案件不一致。',
+    'name_mismatch': '備註的申請人姓名與本案件不一致。',
+    'phone_mismatch': '訂購人及收件人電話均未與案件電話吻合。',
+    'order_already_bound': '此付款訂單已配對其他案件或報價，不能重複使用。',
+    'quote_already_bound': '本次報價已配對另一筆付款訂單，請確認是否重複付款。',
+}
 
 
 def _dump(value):
@@ -545,8 +571,12 @@ class ProductionPayments:
         return {**quote, 'notification': notification}
 
     @classmethod
-    def _audit_display(cls, audit, messages):
+    def _audit_display(cls, audit, messages, last_check=None):
         rows = []
+        if last_check:
+            rows.append({'action': 'production_order_check', 'createdAt': last_check['checkedAt'],
+                'detail': ('付款訂單 ' + last_check['orderNumber'] + '：' if last_check['orderNumber'] else '付款訂單核對：')
+                    + last_check['message']})
         kind_labels = {'quote': '付款通知', 'receipt': '付款確認', 'refund': '退款通知'}
         for message in messages:
             if message['kind'] not in kind_labels:
@@ -573,6 +603,60 @@ class ProductionPayments:
             rows.append(entry)
         return rows[:100]
 
+    @staticmethod
+    def _check_display(row):
+        """Business-only projection; never expose provider text, facts or IDs."""
+        try:
+            response = json.loads(row['response'])
+            result = response.get('result', {}) if type(response) is dict else {}
+            result = result if type(result) is dict else {}
+        except (ValueError, TypeError):
+            result = {}
+        state = result.get('state')
+        state = state if state in ('matched_internal_only', 'duplicate', 'blocked') else 'unknown'
+        code = result.get('code')
+        code = code if type(code) is str and code in (*CHECK_REASONS, 'matched_internal_only', 'already_matched_internal_only') else 'unknown'
+        raw_reasons = result.get('reasons')
+        raw_reasons = raw_reasons if type(raw_reasons) is list else []
+        reasons = list(dict.fromkeys(reason for reason in raw_reasons[:50]
+            if type(reason) is str and reason in CHECK_REASONS))
+        unknown_reason = any(type(reason) is not str or reason not in CHECK_REASONS for reason in raw_reasons[:50])
+        if state == 'matched_internal_only' and code == 'matched_internal_only' and not raw_reasons:
+            message = '付款訂單已核對配對；安排送修前仍須確認付款與雲端同步狀態。'
+        elif state == 'duplicate' and code == 'already_matched_internal_only' and not raw_reasons:
+            message = '此訂單已有相同配對紀錄，未重複計入付款；目前結果請見付款狀態。'
+        else:
+            if not reasons and code in CHECK_REASONS:
+                reasons = [code]
+            descriptions = [CHECK_REASONS[reason] for reason in reasons]
+            if 'refunded' in reasons:
+                facts = result.get('facts') if type(result.get('facts')) is dict else {}
+                refund = facts.get('providerPaymentStatus')
+                refund = refund if type(refund) is str else ''
+                descriptions[reasons.index('refunded')] = {
+                    'refunding': '商城已受理退款（平台狀態：退款中），依公司流程視為已退款，停止派車。',
+                    'refunded': '商城回報已退款，此訂單不能作為可用付款，停止派車。',
+                    'partially_refunded': '商城回報部分退款，需客服確認退款處理，目前停止派車。',
+                }.get(refund, CHECK_REASONS['refunded'])
+            elif reasons == ['missing_remark'] and not unknown_reason:
+                descriptions.append('請先核實客戶資料與付款訂單，再使用「漏填下單備註」人工配對。')
+            message = ' '.join(descriptions) or '核對結果尚未確認，請由管理員重新查詢。'
+            if unknown_reason:
+                message += ' 另有未識別的核對原因，請由管理員確認。'
+        number = row['order_number']
+        number = number if type(number) is str and ORDER.fullmatch(number) else ''
+        stamp = row['created_at']
+        if (type(stamp) is not str or not re.fullmatch(
+                r'[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:[+-][0-9]{2}:[0-9]{2}|Z)?', stamp)):
+            stamp = ''
+        if stamp:
+            try:
+                datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+            except ValueError:
+                stamp = ''
+        return {'orderNumber': number, 'state': state, 'code': code,
+            'reasons': reasons, 'message': message, 'checkedAt': stamp}
+
     def detail(self, real_id):
         case = self._repair(real_id)
         data = _case_data(case)
@@ -583,7 +667,8 @@ class ProductionPayments:
             'lineName': case.get('line_display_name') or data.get('name', ''),
             'managed': 'paymentWorkflow' in data, 'legacy': 'paymentWorkflow' not in data,
             'version': 0, 'quote': None, 'payment': None, 'quoteHistory': [], 'audit': [],
-            'receipts': [], 'refundNotices': [], 'notifications': [], 'releaseAllowed': self.is_allowed(case)}
+            'receipts': [], 'refundNotices': [], 'notifications': [], 'lastCheck': None,
+            'releaseAllowed': self.is_allowed(case)}
         if link:
             detail = self.desk.get_case(link['wb_id'])
             result.update(version=detail['case']['version'], quote=detail['case']['latestQuote'],
@@ -594,10 +679,14 @@ class ProductionPayments:
                 result['payment'] = {**payment, 'sync': next((q for q in preview['queue'] if q['caseId'] == link['wb_id']), {})}
             with self.connect() as c:
                 messages = [dict(r) for r in c.execute('SELECT kind,quote_id,order_number,status,attempts,last_error,accepted_at FROM wb_prod_messages WHERE quote_id IN (SELECT id FROM wb_quotes WHERE case_id=?) ORDER BY id DESC', (link['wb_id'],))]
+                check = c.execute('''SELECT order_number,created_at,response FROM wb_real_order_checks
+                    WHERE case_id=? AND quote_id=? ORDER BY rowid DESC LIMIT 1''',
+                    (link['wb_id'], result['quote']['id'])).fetchone() if result['quote'] else None
+            result['lastCheck'] = self._check_display(check) if check else None
             result['notifications'] = messages
             result['quote'] = self._quote_display(result['quote'], messages)
             result['quoteHistory'] = [self._quote_display(quote, messages) for quote in detail['quotes']]
-            result['audit'] = self._audit_display(detail['audit'], messages)
+            result['audit'] = self._audit_display(detail['audit'], messages, result['lastCheck'])
             result['receipts'] = [r for r in messages if r['kind'] == 'receipt']
             result['refundNotices'] = [r for r in messages if r['kind'] == 'refund']
             result['refunds'] = self.reconciliation.refund_followups(result['quote']['id']) if result['quote'] else {'followups': []}
