@@ -1341,8 +1341,8 @@ class Handler(BaseHTTPRequestHandler):
                           'repairPolicy':'保固外付費維修' if order_choice == 'missing' else '待核對保固'})
             clean.update({'shipping':shipping,
                           'pickupFeeTwd':350 if shipping == '由客服派遣物流回收' else None,
-                          'shippingNote':'親送需要裝箱，由管理室收取；裸機送回管理室會拒收。' if shipping == '親自送回' else ''})
-            clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-16-v4'})
+                          'shippingNote':'親送需要裝箱，由管理室收取；裸機送回管理室會拒收。\n若技師判斷包裝強度不足，寄送有損壞風險，維修完成後將請你自行領回。\n若你仍堅持寄送，寄送過程中的損壞風險皆由你自行承擔，本公司不承擔相關損壞風險與賠償責任。' if shipping == '親自送回' else ''})
+            clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-16-v5'})
             if PAYMENTS is not None and PAYMENTS.new_cases_enabled is True:
                 clean['paymentWorkflow']=PAYMENT_WORKFLOW
             now=time.strftime('%Y-%m-%d %H:%M:%S'); day=time.strftime('%Y%m%d')
