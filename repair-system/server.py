@@ -6,6 +6,7 @@ from contextlib import contextmanager, closing
 from line_support import load_private_config, verify_id_token, validate_webhook_signature, inspect_bot, get_profile, send_push, send_reply, get_webhook_endpoint, set_webhook_endpoint, get_group_summary, send_group_text
 from cloud_support import build_payload, init_queue, validate_endpoint, validate_secret, format_sheet_phone, PRIMARY_SHEET_ID, PICKUP_SHEET_ID, PICKUP_SHEET_GID
 from dispatch_workflow import DispatchWorkflow, init_tables as init_dispatch_workflow, cancel_for_group as cancel_dispatch_workflow
+from address_support import public_address_data, validate_case_addresses
 
 ROOT = Path(__file__).parent
 CLOUD_DEPLOYMENT = os.environ.get('REPAIR_DEPLOYMENT','').strip().lower()=='cloud'
@@ -1153,6 +1154,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200,{'cases':[self.case_dict(r,u['admin']) for r in rows]})
         if path in ('/','/admin','/index.html'):
             raw=(ROOT/'index.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.send_header('Referrer-Policy','no-referrer'); self.end_headers(); self.wfile.write(raw); return
+        if path=='/address-data.json':
+            return self.send(200,public_address_data())
         if path=='/assets/return-items.png':
             raw=(ROOT/'assets'/'return-items.png').read_bytes()
             self.send_response(200); self.send_header('Content-Type','image/png'); self.send_header('Content-Length',str(len(raw))); self.end_headers(); self.wfile.write(raw); return
@@ -1311,22 +1314,13 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/cases':
             if not DEMO and (u.get('admin') or not u.get('lineVerified') or not isinstance(u.get('id'),str) or not re.fullmatch(r'U[0-9a-f]{32}',u['id'])):
                 return self.send(403,{'error':'請以客戶 LINE 帳號登入後提交維修申請'})
-            fields=['name','phone','model','problem','returnAddress','shipping']
+            fields=['name','phone','model','problem','shipping']
             if any(not isinstance(data.get(k),str) or not data[k].strip() for k in fields): return self.send(400,{'error':'請填寫所有必填欄位'})
             if any(len(str(v))>8000 for v in data.values()): return self.send(400,{'error':'欄位內容過長'})
             shipping = data['shipping'].strip()
             if shipping == '客服安排收件': shipping = '由客服派遣物流回收'
             if shipping not in ['自行寄送','由客服派遣物流回收','親自送回']:
                 return self.send(400,{'error':'寄送方式錯誤'})
-            pickup_address = data.get('pickupAddress', '')
-            if shipping == '由客服派遣物流回收':
-                if not isinstance(pickup_address, str) or not pickup_address.strip():
-                    return self.send(400,{'error':'請填寫物流回收的取件地址'})
-                pickup_address = pickup_address.strip()
-                if len(pickup_address) > 1000:
-                    return self.send(400,{'error':'取件地址不可超過 1000 字'})
-            else:
-                pickup_address = ''
             order_choice = data.get('orderChoice')
             if order_choice not in ('provided', 'missing'):
                 return self.send(400,{'error':'請選擇是否能提供訂單編號'})
@@ -1345,10 +1339,10 @@ class Handler(BaseHTTPRequestHandler):
             clean={k:str(data.get(k,'')) for k in ['name','phone','email','model','serial','order','purchase','problem','extra','shipping','pickupAddress','returnAddress']}
             clean.update({'order':order_number,'orderChoice':order_choice,
                           'repairPolicy':'保固外付費維修' if order_choice == 'missing' else '待核對保固'})
-            clean.update({'shipping':shipping,'pickupAddress':pickup_address,
+            clean.update({'shipping':shipping,
                           'pickupFeeTwd':350 if shipping == '由客服派遣物流回收' else None,
                           'shippingNote':'親送需要裝箱，由管理室收取；裸機送回管理室會拒收。' if shipping == '親自送回' else ''})
-            clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-14-v3'})
+            clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-16-v4'})
             if PAYMENTS is not None and PAYMENTS.new_cases_enabled is True:
                 clean['paymentWorkflow']=PAYMENT_WORKFLOW
             now=time.strftime('%Y-%m-%d %H:%M:%S'); day=time.strftime('%Y%m%d')
@@ -1358,6 +1352,10 @@ class Handler(BaseHTTPRequestHandler):
                 if old: return self.send(200,{'case':self.case_dict(old)})
                 if c.execute('SELECT 1 FROM deleted_case_requests WHERE user_id=? AND request_id=?',(u['id'],rid)).fetchone():
                     return self.send(409,{'error':'此測試申請已清理，請重新開啟表單後再送出。','code':'case_cleaned'})
+                try:
+                    clean.update(validate_case_addresses(data, shipping))
+                except ValueError as exc:
+                    return self.send(400,{'error':str(exc)})
                 ident=next_case_number(c,day)
                 history=json.dumps([{'time':now,'status':'已申請','by':'客戶'}],ensure_ascii=False)
                 c.execute('INSERT INTO cases(id,user_id,request_id,data,status,created,history,line_display_name) VALUES(?,?,?,?,?,?,?,?)',(ident,u['id'],rid,json.dumps(clean,ensure_ascii=False),'已申請',now,history,trusted_display_name(u.get('displayName'))))
