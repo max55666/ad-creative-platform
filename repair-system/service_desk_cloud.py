@@ -582,6 +582,8 @@ def _intake_request(current, path, query, method, headers, body, start_response,
             parameters = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=8)
             if (set(parameters) - {'code', 'state', 'error', 'error_description', 'friendship_status_changed', 'scope'}
                     or any(len(v) != 1 for v in parameters.values()) or 'error' in parameters):
+                logging.getLogger('petpivot.internal.intake').warning(
+                    'internal_test_intake_failure stage=callback_parameters')
                 raise ValueError()
             token = intake.finish(parameters.get('state', [''])[0],
                 _cookie(headers, 'wb_intake_state'), parameters.get('code', [''])[0])

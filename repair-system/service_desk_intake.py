@@ -7,6 +7,7 @@ import base64
 from contextlib import contextmanager
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -16,6 +17,27 @@ import time
 from urllib.parse import urlencode, urlsplit
 import urllib.request
 import uuid
+
+
+_FAILURE_STAGES = frozenset({'oauth_state', 'token_exchange', 'id_verify',
+    'profile_read', 'claims_validation', 'profile_validation', 'invite_binding'})
+
+
+def _diagnostic(stage):
+    """One fixed stage only: never log exception text, URLs or identity data."""
+    safe_stage = stage if type(stage) is str and stage in _FAILURE_STAGES else 'oauth_state'
+    logging.getLogger('petpivot.internal.intake').warning(
+        'internal_test_intake_failure stage=%s', safe_stage,
+        exc_info=None, stack_info=False)
+
+
+@contextmanager
+def _stage(stage, message):
+    try:
+        yield
+    except Exception:
+        _diagnostic(stage)
+        raise ValueError(message) from None
 
 
 def _hash(value):
@@ -163,19 +185,24 @@ class TestIntake:
             'code_challenge': challenge, 'code_challenge_method': 'S256'})
 
     def finish(self, state, cookie_state, code):
-        if (not self.configured() or not _token(state) or not _token(cookie_state)
-                or not secrets.compare_digest(state, cookie_state)
-                or not isinstance(code, str) or not 1 <= len(code) <= 2048):
-            raise ValueError('LINE 登入狀態不符，請重新登入')
-        with self._db(True) as c:
-            row = c.execute('SELECT * FROM wb_intake_oauth WHERE hash=?', (_hash(state),)).fetchone()
-            if not row or row['expires'] <= self.clock():
-                raise ValueError('LINE 登入已逾時，請重新登入')
-            c.execute('DELETE FROM wb_intake_oauth WHERE hash=?', (_hash(state),))
-            saved = dict(row)
-        try:
+        with _stage('oauth_state', 'LINE 登入狀態不符或已逾時，請重新登入'):
+            if (not self.configured() or not _token(state) or not _token(cookie_state)
+                    or not secrets.compare_digest(state, cookie_state)
+                    or not isinstance(code, str) or not 1 <= len(code) <= 2048):
+                raise ValueError()
+            with self._db(True) as c:
+                row = c.execute('SELECT * FROM wb_intake_oauth WHERE hash=?', (_hash(state),)).fetchone()
+                if not row or row['expires'] <= self.clock():
+                    raise ValueError()
+                c.execute('DELETE FROM wb_intake_oauth WHERE hash=?', (_hash(state),))
+                saved = dict(row)
+        with _stage('token_exchange', '內測 LINE 登入交換未完成，請重新登入'):
             token = self.exchange(code, saved['verifier'], self.channel_id, self.secret, self.base + '/test-line-callback')
+            if not isinstance(token, str) or not 1 <= len(token) <= 16384:
+                raise ValueError()
+        with _stage('id_verify', 'LINE 身分驗證未完成，請重新登入'):
             claims = self.verify(token, self.channel_id, nonce=saved['nonce'])
+        with _stage('claims_validation', 'LINE 身分驗證未完成，請重新登入'):
             if not isinstance(claims, dict):
                 raise ValueError()
             uid, expiry = claims.get('sub'), claims.get('exp')
@@ -184,27 +211,28 @@ class TestIntake:
                     or claims.get('nonce') != saved['nonce'] or type(expiry) not in (int, float)
                     or not math.isfinite(expiry) or expiry <= self.clock()):
                 raise ValueError()
+        with _stage('profile_read', '請先加入客服官方 LINE 好友，再使用內測邀請登入'):
             profile = self.profile(uid)
+        with _stage('profile_validation', '請先加入客服官方 LINE 好友，再使用內測邀請登入'):
             if not isinstance(profile, dict):
                 raise ValueError()
-        except Exception:
-            raise ValueError('LINE 身分驗證未完成，請重新登入') from None
-        name = profile.get('displayName')
-        if (profile.get('userId') != uid or not isinstance(name, str) or not 1 <= len(name) <= 80
-                or not name.strip() or any(ord(ch)<32 or ord(ch)==127 or 0xD800 <= ord(ch) <= 0xDFFF for ch in name)):
-            raise ValueError('請先加入客服官方 LINE 好友，再使用內測邀請登入')
-        session = secrets.token_urlsafe(32)
-        with self._db(True) as c:
-            invite = c.execute('SELECT * FROM wb_intake_invites WHERE hash=?', (saved['invite_hash'],)).fetchone()
-            if not invite or invite['expires'] <= self.clock():
-                raise ValueError('內測邀請已失效')
-            person = c.execute('SELECT * FROM wb_intake_customers WHERE line_user=?', (uid,)).fetchone()
-            cid = person['id'] if person else 'WC-' + str(uuid.uuid4())
-            if invite['bound_customer'] and invite['bound_customer'] != cid:
-                raise ValueError('此內測邀請已由其他帳號使用')
-            c.execute('INSERT INTO wb_intake_customers VALUES(?,?,?,0,?) ON CONFLICT(line_user) DO UPDATE SET display_name=excluded.display_name', (cid, uid, name, self.clock()))
-            c.execute('UPDATE wb_intake_invites SET bound_customer=? WHERE hash=?', (cid, saved['invite_hash']))
-            c.execute('INSERT INTO wb_intake_sessions VALUES(?,?,?)', (_hash(session), cid, self.clock()+86400))
+            name = profile.get('displayName')
+            if (profile.get('userId') != uid or not isinstance(name, str) or not 1 <= len(name) <= 80
+                    or not name.strip() or any(ord(ch)<32 or ord(ch)==127 or 0xD800 <= ord(ch) <= 0xDFFF for ch in name)):
+                raise ValueError()
+        with _stage('invite_binding', '內測邀請綁定未完成，請使用自己的新邀請重新登入'):
+            session = secrets.token_urlsafe(32)
+            with self._db(True) as c:
+                invite = c.execute('SELECT * FROM wb_intake_invites WHERE hash=?', (saved['invite_hash'],)).fetchone()
+                if not invite or invite['expires'] <= self.clock():
+                    raise ValueError()
+                person = c.execute('SELECT * FROM wb_intake_customers WHERE line_user=?', (uid,)).fetchone()
+                cid = person['id'] if person else 'WC-' + str(uuid.uuid4())
+                if invite['bound_customer'] and invite['bound_customer'] != cid:
+                    raise ValueError()
+                c.execute('INSERT INTO wb_intake_customers VALUES(?,?,?,0,?) ON CONFLICT(line_user) DO UPDATE SET display_name=excluded.display_name', (cid, uid, name, self.clock()))
+                c.execute('UPDATE wb_intake_invites SET bound_customer=? WHERE hash=?', (cid, saved['invite_hash']))
+                c.execute('INSERT INTO wb_intake_sessions VALUES(?,?,?)', (_hash(session), cid, self.clock()+86400))
         return session
 
     def identity(self, token):
