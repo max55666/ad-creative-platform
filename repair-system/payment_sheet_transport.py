@@ -17,7 +17,7 @@ from cloud_support import GoogleContentRedirect
 SCHEMA = 'petpivot-payment-v1'
 FIELDS = ('caseId', 'name', 'status', 'repairFee', 'pickupFee', 'amountDue',
           'amountPaid', 'orderNumber', 'paidAt', 'checkedAt', 'quoteVersion', 'revision')
-STATUSES = frozenset(('待核價', '待付款', '已付款', '需人工核對', '免付款', '退款需處理'))
+STATUSES = frozenset(('待核價', '待付款', '已付款', '需人工核對', '免付款', '退款需處理', '已退款'))
 MAX_BODY = 32768
 MAX_ACK = 8192
 MAX_SAFE_INTEGER = 9007199254740991
@@ -73,12 +73,12 @@ def validate_payment(record):
     if not isinstance(order, str) or order and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', order):
         raise ValueError('invalid_payment')
     if (not _timestamp(record['paidAt'], True)
-            or not _timestamp(record['checkedAt'], status not in ('已付款', '退款需處理'))):
+            or not _timestamp(record['checkedAt'], status not in ('已付款', '退款需處理', '已退款'))):
         raise ValueError('invalid_payment')
     if status == '已付款':
         if record['amountDue'] <= 0 or record['amountPaid'] != record['amountDue'] or not order:
             raise ValueError('invalid_payment')
-    elif status == '退款需處理':
+    elif status in ('退款需處理', '已退款'):
         if not order:
             raise ValueError('invalid_payment')
     elif record['amountPaid'] != 0 or record['paidAt'] != '':
