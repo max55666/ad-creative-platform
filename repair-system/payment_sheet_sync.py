@@ -147,7 +147,15 @@ class PaymentSheetSync:
                     and facts.get('quoteVersion') == quote['version']
                     and facts.get('currentQuote') is True):
                 continue
-            checked.append({'row': row, 'response': response, 'result': result, 'facts': facts})
+            approval = None
+            if facts.get('manualRemarkException') is True:
+                table = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_real_manual_approvals'").fetchone()
+                if table:
+                    approval = c.execute('''SELECT * FROM wb_real_manual_approvals
+                        WHERE quote_id=? AND case_id=? AND order_id=? AND order_number=?''',
+                        (quote['id'], case_id, row['order_id'], row['order_number'])).fetchone()
+            checked.append({'row': row, 'response': response, 'result': result, 'facts': facts,
+                            'manualApproval': approval is not None})
         return checked
 
     @staticmethod
@@ -162,15 +170,17 @@ class PaymentSheetSync:
                 and type(facts.get('orderTotal')) is int and facts['orderTotal'] == due
                 and type(facts.get('quoteTotal')) is int and facts['quoteTotal'] == due
                 and facts.get('currency') == 'TWD'
-                and facts.get('caseSource') == 'snapshot'
+                and facts.get('caseSource') in ('snapshot', 'test_intake')
                 and all(facts.get(field) is True for field in ('productValid', 'amountMatches',
-                    'remarkCaseMatches', 'remarkNameMatches', 'contactPhoneMatches', 'orderCreatedAfterQuote'))
+                    'contactPhoneMatches', 'orderCreatedAfterQuote'))
+                and ((facts.get('remarkCaseMatches') is True and facts.get('remarkNameMatches') is True)
+                     or (facts.get('manualRemarkException') is True and check.get('manualApproval') is True))
                 and bool(re.fullmatch(r'[A-Za-z0-9_-]{1,64}', row['order_number'])))
 
     def _projection(self, c, row):
         data = _object(row['data'])
         number, name = data.get('caseNumber', ''), _text(data.get('name', ''), 100)
-        if (data.get('source') != 'snapshot' or type(number) is not str
+        if (data.get('source') not in ('snapshot', 'test_intake') or type(number) is not str
                 or re.fullmatch(r'R[0-9]{8}-[0-9]{4,8}', number) is None):
             return None
         quote = c.execute('SELECT * FROM wb_quotes WHERE id=? AND case_id=?',
@@ -204,6 +214,12 @@ class PaymentSheetSync:
                 elif (latest_same['facts'].get('providerPaymentStatus') != 'completed'
                       or not self._success(latest_same, due)):
                     status, paid = '需人工核對', 0
+                followups = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_refund_followups'").fetchone()
+                if followups and c.execute('SELECT 1 FROM wb_refund_followups WHERE quote_id=? AND order_id=? AND order_number=?',
+                        (quote['id'], success['row']['order_id'], order_number)).fetchone():
+                    # A later provider flip cannot silently clear a recorded
+                    # refund hold, including an administratively closed refund.
+                    status, paid = '退款需處理', due
             elif due and (row['status'] in ('needs_review', 'simulated_paid')
                           or quote['payment_status'] in ('needs_review', 'simulated_paid')
                           or quote['accepted_order_id']):

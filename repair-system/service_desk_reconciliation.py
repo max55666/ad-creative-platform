@@ -1,7 +1,8 @@
 """Local-only observations of freshly read SHOPLINE test orders.
 
-This module performs no network calls and never recognizes a real payment.
-Its only writes are wb_real_order_checks and the existing workbench audit.
+This module performs no network calls and never recognizes production payment.
+Its writes stay in wb_* checks, explicit manual approvals, refund follow-ups,
+and the existing workbench audit.
 The provider provenance argument is constructed by the server after its own
 read-only provider lookup; browser-supplied orders must never reach this API.
 """
@@ -117,6 +118,24 @@ def _remark(value):
     return case_number, name, ''
 
 
+def _missing_remark_exception(value, case):
+    """Human confirmation may supply absent labels, never contradict supplied data."""
+    if type(value) is not str or len(value) > 2000:
+        return False
+    values = {}
+    for line in value.replace('\r\n', '\n').split('\n'):
+        if not line.strip():
+            continue
+        label = next((label for label in ('送修編號：', '申請人姓名：') if line.startswith(label)), None)
+        if label is None or label in values:
+            return False
+        values[label] = line[len(label):]
+    if len(values) == 2 and all(values.values()):
+        return False
+    return all(not value or value == case.get('caseNumber' if label == '送修編號：' else 'name')
+               for label, value in values.items())
+
+
 class RealOrderReconciliation:
     def __init__(self, connection_factory):
         self.connection_factory = connection_factory
@@ -161,7 +180,37 @@ class RealOrderReconciliation:
                           ' ON wb_real_order_checks(' + field +
                           ") WHERE outcome='matched_internal_only'")
             c.execute('CREATE INDEX IF NOT EXISTS wb_real_quote_checks ON wb_real_order_checks(quote_id,created_at)')
+            c.execute('''CREATE TABLE IF NOT EXISTS wb_real_manual_approvals (
+                quote_id TEXT PRIMARY KEY, case_id TEXT NOT NULL,
+                order_id TEXT NOT NULL UNIQUE, order_number TEXT NOT NULL UNIQUE,
+                check_id TEXT NOT NULL UNIQUE, actor TEXT NOT NULL, reason TEXT NOT NULL,
+                facts TEXT NOT NULL, created_at TEXT NOT NULL)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS wb_refund_followups (
+                quote_id TEXT PRIMARY KEY, case_id TEXT NOT NULL, order_id TEXT NOT NULL,
+                order_number TEXT NOT NULL, provider_status TEXT NOT NULL,
+                observation_check_id TEXT NOT NULL, status TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                closed_at TEXT NOT NULL DEFAULT '', closed_by TEXT NOT NULL DEFAULT '',
+                resolution_reason TEXT NOT NULL DEFAULT '', close_request_id TEXT NOT NULL DEFAULT '')''')
         return dict(FLAGS)
+
+    @staticmethod
+    def _manual_decision(response, order, context, approval):
+        if not approval or not context:
+            return response
+        result, facts = response['result'], response['result']['facts']
+        if _missing_remark_exception(order.get('orderRemarks'), context['case']):
+            result['reasons'] = [reason for reason in result['reasons']
+                                 if reason not in ('missing_remark', 'conflicting_remark')]
+            facts['manualRemarkException'] = True
+            facts['manualApprovalActor'] = approval['actor']
+            if not result['reasons']:
+                result.update(state='matched_internal_only', code='matched_internal_only',
+                              message=MESSAGES['matched_internal_only'])
+                response['source'] = 'shopline_api_completed'
+            else:
+                result.update(code=result['reasons'][0], message=MESSAGES[result['reasons'][0]])
+        return response
 
     @staticmethod
     def _context(c, wrapper):
@@ -242,7 +291,7 @@ class RealOrderReconciliation:
         facts['reportedPaidAt'] = paid_at.isoformat() if paid_at else ''
         if context:
             quote, case = context['quote'], context['case']
-            if case.get('source') != 'snapshot':
+            if case.get('source') not in ('snapshot', 'test_intake'):
                 reject('not_snapshot')
             if quote['status'] != 'active' or case['latestQuoteId'] != quote['id']:
                 reject('superseded_quote')
@@ -325,9 +374,20 @@ class RealOrderReconciliation:
                 raise ValueError('相同內測核對請求不可更換報價或訂單')
             return {**json.loads(row['response']), 'idempotent': True}
 
-    def record(self, order, quote_wrapper, request_id, *, provenance):
+    def record_manual(self, order, quote_wrapper, request_id, *, provenance, confirm, reason, actor):
+        if confirm is not True:
+            raise ValueError('人工配對必須明確確認已核對訂單身分及付款資料')
+        if not _text(reason, 500) or len(reason.strip()) < 5:
+            raise ValueError('請填寫至少 5 字的人工配對原因')
+        if not _text(actor, 100) or not actor.strip():
+            raise ValueError('人工配對必須記錄已登入的客服人員')
+        return self.record(order, quote_wrapper, request_id, provenance=provenance,
+                           _manual={'actor': actor.strip(), 'reason': reason.strip()})
+
+    def record(self, order, quote_wrapper, request_id, *, provenance, _manual=None):
         _request_id(request_id)
-        fingerprint = self._fingerprint(order, quote_wrapper, provenance)
+        fingerprint = self._fingerprint(order, quote_wrapper,
+            {**provenance, 'manualConfirmation': _manual} if type(provenance) is dict and _manual else provenance)
         quote_id, case_id = self._reference(quote_wrapper)
         with self._connection(True) as c:
             previous = c.execute('SELECT * FROM wb_real_order_checks WHERE request_id=?', (request_id,)).fetchone()
@@ -341,6 +401,13 @@ class RealOrderReconciliation:
             number = order.get('orderNumber', '') if type(order) is dict else ''
             identity = identity if type(identity) is str and _ORDER_ID.fullmatch(identity) else ''
             number = number if type(number) is str and _NUMBER.fullmatch(number) else ''
+            saved_approval = c.execute('''SELECT * FROM wb_real_manual_approvals
+                WHERE quote_id=? AND order_id=? AND order_number=?''', (quote_id, identity, number)).fetchone()
+            approval = _manual or (dict(saved_approval) if saved_approval else None)
+            if _manual and (not context or not _missing_remark_exception(order.get('orderRemarks'), context['case'])):
+                # This path exists solely for omitted labels, not generic override.
+                raise ValueError('人工配對只適用漏填備註；已填資料衝突或備註完整時請使用一般核對')
+            response = self._manual_decision(response, order, context, approval)
             if response['result']['state'] == 'matched_internal_only':
                 prior_order = c.execute("SELECT quote_id,order_id,order_number FROM wb_real_order_checks WHERE outcome='matched_internal_only' AND (order_id=? OR order_number=?)", (identity, number)).fetchone()
                 prior_quote = c.execute("SELECT order_id,order_number FROM wb_real_order_checks WHERE outcome='matched_internal_only' AND quote_id=?", (quote_id,)).fetchone()
@@ -362,11 +429,106 @@ class RealOrderReconciliation:
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)''', (check_id, request_id, fingerprint, identity,
                 number, quote_id, case_id, context['quote']['version'] if context else 0,
                 response['result']['state'], _dump(response), now))
+            if (_manual and response['result']['state'] == 'matched_internal_only'
+                    and response['result']['facts'].get('manualRemarkException') is True):
+                c.execute('''INSERT INTO wb_real_manual_approvals(quote_id,case_id,order_id,
+                    order_number,check_id,actor,reason,facts,created_at) VALUES(?,?,?,?,?,?,?,?,?)''',
+                    (quote_id, case_id, identity, number, check_id, _manual['actor'],
+                     _manual['reason'], _dump(response['result']['facts']), now))
+                c.execute('INSERT INTO wb_audit(case_id,action,detail,created_at) VALUES(?,?,?,?)',
+                    (case_id, 'real_order_manual_approved', _dump({'actor': _manual['actor'],
+                     'reason': _manual['reason'], 'orderNumber': number, 'checkId': check_id}), now))
+            bound = c.execute("SELECT 1 FROM wb_real_order_checks WHERE quote_id=? AND order_id=? AND order_number=? AND outcome='matched_internal_only'",
+                              (quote_id, identity, number)).fetchone()
+            if bound and response['result']['facts'].get('providerPaymentStatus') in ('refunded', 'partially_refunded', 'refunding'):
+                provider_status = response['result']['facts']['providerPaymentStatus']
+                previous_refund = c.execute('SELECT * FROM wb_refund_followups WHERE quote_id=?', (quote_id,)).fetchone()
+                if previous_refund is None:
+                    c.execute('''INSERT INTO wb_refund_followups(quote_id,case_id,order_id,order_number,
+                        provider_status,observation_check_id,status,created_at,updated_at)
+                        VALUES(?,?,?,?,?,?,'open',?,?)''',
+                        (quote_id, case_id, identity, number, provider_status, check_id, now, now))
+                else:
+                    reopen = previous_refund['provider_status'] != provider_status
+                    c.execute('''UPDATE wb_refund_followups SET provider_status=?,observation_check_id=?,
+                        status=?,updated_at=? WHERE quote_id=?''',
+                        (provider_status, check_id, 'open' if reopen else previous_refund['status'], now, quote_id))
             if context:
                 c.execute('INSERT INTO wb_audit(case_id,action,detail,created_at) VALUES(?,?,?,?)',
                     (case_id, 'real_order_check_' + response['result']['state'],
                      '真實測試訂單本機核對：' + response['result']['message'], now))
             return response
+
+    def refund_followups(self, quote_id=None):
+        if quote_id is not None and not _identifier(quote_id, 'WQ-'):
+            raise ValueError('內測報價識別碼不正確')
+        with self._connection() as c:
+            rows = c.execute('SELECT * FROM wb_refund_followups' +
+                (' WHERE quote_id=?' if quote_id else '') + ' ORDER BY updated_at DESC LIMIT 100',
+                (quote_id,) if quote_id else ()).fetchall()
+            items = [{'quoteId': row['quote_id'], 'caseId': row['case_id'],
+                'orderNumber': row['order_number'], 'providerStatus': row['provider_status'],
+                'observationCheckId': row['observation_check_id'], 'status': row['status'],
+                'createdAt': row['created_at'], 'updatedAt': row['updated_at'],
+                'closedAt': row['closed_at'], 'closedBy': row['closed_by'],
+                'resolutionReason': row['resolution_reason']} for row in rows]
+            return {**FLAGS, 'followups': items}
+
+    def bound_order_number(self, quote_id):
+        """Read the durable unique successful claim, never the bounded UI history."""
+        if not _identifier(quote_id, 'WQ-'):
+            raise ValueError('內測報價識別碼不正確')
+        with self._connection() as c:
+            rows = c.execute("SELECT * FROM wb_real_order_checks WHERE quote_id=? AND outcome='matched_internal_only'",
+                             (quote_id,)).fetchall()
+            if not rows:
+                return None
+            if len(rows) != 1:
+                raise ValueError('此報價的付款訂單綁定不唯一')
+            row = rows[0]
+            response = json.loads(row['response'])
+            result = response.get('result', {})
+            facts = result.get('facts', {})
+            if (response.get('quoteId') != quote_id or response.get('orderNumber') != row['order_number']
+                    or response.get('source') != 'shopline_api_completed'
+                    or result.get('state') != 'matched_internal_only' or result.get('reasons') != []
+                    or facts.get('freshProviderLookup') is not True
+                    or facts.get('providerPaymentStatus') != 'completed'
+                    or _NUMBER.fullmatch(row['order_number']) is None):
+                raise ValueError('此報價的付款訂單綁定證據不完整')
+            return row['order_number']
+
+    def close_refund(self, quote_id, payload, *, actor):
+        if not _identifier(quote_id, 'WQ-') or type(payload) is not dict or set(payload) != {'requestId', 'reason', 'confirm'}:
+            raise ValueError('退款追蹤資料不正確')
+        request_id = _request_id(payload['requestId'])
+        reason = payload.get('reason')
+        if (payload['confirm'] is not True or not _text(reason, 500) or len(reason.strip()) < 5
+                or not _text(actor, 100) or not actor.strip()):
+            raise ValueError('退款結案必須確認，並記錄客服人員及至少 5 字處理說明')
+        with self._connection(True) as c:
+            row = c.execute('SELECT * FROM wb_refund_followups WHERE quote_id=?', (quote_id,)).fetchone()
+            if row is None:
+                raise ValueError('找不到退款追蹤紀錄')
+            check = c.execute('''SELECT response FROM wb_real_order_checks WHERE quote_id=? AND
+                order_id=? AND order_number=? ORDER BY rowid DESC LIMIT 1''',
+                (quote_id, row['order_id'], row['order_number'])).fetchone()
+            facts = json.loads(check['response'])['result']['facts'] if check else {}
+            if row['provider_status'] != 'refunded' or facts.get('providerPaymentStatus') != 'refunded' or facts.get('freshProviderLookup') is not True:
+                raise ValueError('SHOPLINE 尚未回報此筆訂單全額退款完成，不能結案')
+            if row['status'] == 'closed':
+                if row['close_request_id'] == request_id and row['closed_by'] == actor.strip() and row['resolution_reason'] == reason.strip():
+                    return {**FLAGS, 'closed': True, 'quoteId': quote_id, 'idempotent': True}
+                raise ValueError('此退款追蹤已結案')
+            now = datetime.now(TAIPEI).strftime('%Y-%m-%d %H:%M:%S')
+            c.execute('''UPDATE wb_refund_followups SET status='closed',closed_at=?,closed_by=?,
+                resolution_reason=?,close_request_id=?,updated_at=? WHERE quote_id=?''',
+                (now, actor.strip(), reason.strip(), request_id, now, quote_id))
+            c.execute('INSERT INTO wb_audit(case_id,action,detail,created_at) VALUES(?,?,?,?)',
+                (row['case_id'], 'refund_followup_closed', _dump({'actor': actor.strip(),
+                 'reason': reason.strip(), 'orderNumber': row['order_number'],
+                 'providerCheckId': row['observation_check_id']}), now))
+            return {**FLAGS, 'closed': True, 'quoteId': quote_id, 'idempotent': False}
 
     def history(self, quote_id=None):
         if quote_id is not None and not _identifier(quote_id, 'WQ-'):

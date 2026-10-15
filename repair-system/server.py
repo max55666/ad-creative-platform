@@ -83,6 +83,8 @@ SERVICE_DESK_PAYMENT_SHEET_WORKER = None
 # application. The cloud adapter owns its route allowlist and HTTPS boundary.
 SERVICE_DESK_CLOUD_INTERNAL = False
 SERVICE_DESK_AUTOMATION = None
+SERVICE_DESK_OPERATIONS = None
+SERVICE_DESK_TEST_INTAKE = None
 PAYMENT_LAB_MAX_BODY = 16384
 PAYMENT_LAB_HEADERS = {
     'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
@@ -99,6 +101,138 @@ def payment_lab_enabled():
 def service_desk_enabled():
     return (payment_lab_enabled() and os.environ.get('REPAIR_SERVICE_DESK') == '1'
             and DEMO and (not CLOUD_DEPLOYMENT or SERVICE_DESK_CLOUD_INTERNAL))
+
+
+def service_desk_allowed_case_ids():
+    """Resolve the server-owned registry each time; browser data cannot enroll cases."""
+    try:
+        registry = SERVICE_DESK_RECONCILIATION_ALLOWED_CASES
+        values = registry() if callable(registry) else registry
+        if not isinstance(values, (set, frozenset, tuple, list)):
+            return frozenset()
+        return frozenset(value for value in values if type(value) is str
+                         and re.fullmatch(r'WB-[a-f0-9-]{36}', value))
+    except Exception:
+        return frozenset()
+
+
+def service_desk_refresh_operations(case_id):
+    if SERVICE_DESK_OPERATIONS is None or not service_desk_enabled():
+        return {'configured': False, 'internalOnly': True, 'releaseAllowed': False}
+    try:
+        if case_id not in service_desk_allowed_case_ids():
+            raise ValueError('案件不在內測作業名單')
+        return SERVICE_DESK_OPERATIONS.refresh(case_id)
+    except Exception:
+        return {'configured': True, 'state': 'failed', 'internalOnly': True,
+                'internalDispatchAllowed': False, 'releaseAllowed': False,
+                'message': '付款資料已保存，派車門檻需重新整理確認'}
+
+
+def service_desk_request_id(value):
+    try:
+        valid = type(value) is str and uuid.UUID(value).version == 4 and str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError, TypeError):
+        valid = False
+    if not valid:
+        raise ValueError('請求識別碼格式不正確')
+    return value
+
+
+def service_desk_scoped_quote(quote_id):
+    wrapper = service_desk_service().get_quote(quote_id)
+    if not wrapper:
+        raise ValueError('找不到內測報價')
+    if wrapper['case']['id'] not in service_desk_allowed_case_ids():
+        raise ValueError('此案件未列入本次真實測試訂單的副本名單')
+    return wrapper
+
+
+def service_desk_fetch_exact_order(number):
+    if type(number) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', number):
+        raise ValueError('訂單編號格式不正確')
+    if SERVICE_DESK_ORDER_PREVIEW is None:
+        raise ValueError('尚未設定唯讀訂單橋接')
+    from shopline_preview import PreviewBusy
+    try:
+        state = SERVICE_DESK_ORDER_PREVIEW.fetch({'orderNumber': number})
+    except PreviewBusy:
+        raise
+    except Exception:
+        raise ValueError('本次 SHOPLINE 唯讀查詢未完成，請稍後再試') from None
+    if (type(state) is not dict or state.get('status') != 'ok'
+            or state.get('configured') is not True or state.get('truncated') is not False
+            or state.get('simulation') is not False or state.get('readOnly') is not True
+            or state.get('realPayment') is not False or state.get('releaseAllowed') is not False):
+        raise ValueError('本次 SHOPLINE 唯讀查詢未完成，未採用舊資料配對；請稍後再試')
+    orders = state.get('orders')
+    if (type(orders) is not list or len(orders) != 1
+            or type(orders[0]) is not dict or orders[0].get('orderNumber') != number):
+        raise ValueError('未取得唯一且編號完全相符的維修商品訂單')
+    return orders[0]
+
+
+def service_desk_after_payment(result, case_id):
+    return {**result, 'paymentSheetSync': service_desk_enqueue_payment_sheet(case_id),
+            'operations': service_desk_refresh_operations(case_id)}
+
+
+def service_desk_manual_match(quote_id, payload, actor):
+    if type(payload) is not dict or set(payload) != {'orderNumber', 'requestId', 'confirm', 'reason'}:
+        raise ValueError('人工配對只接受訂單編號、確認、原因與請求識別碼')
+    service_desk_request_id(payload['requestId'])
+    if (payload['confirm'] is not True or type(payload['reason']) is not str
+            or not 5 <= len(payload['reason'].strip()) <= 500):
+        raise ValueError('請確認人工配對並填寫至少 5 字的核對原因')
+    wrapper = service_desk_scoped_quote(quote_id)
+    # Deliberately do not call lookup(): even a retry requires a fresh exact
+    # authenticated provider read before the manual approval ledger is consulted.
+    order = service_desk_fetch_exact_order(payload['orderNumber'])
+    result = service_desk_reconciliation_service().record_manual(order, wrapper, payload['requestId'],
+        provenance={'freshProviderLookup': True, 'readOnly': True},
+        confirm=payload['confirm'], reason=payload['reason'], actor=actor)
+    return service_desk_after_payment(result, wrapper['case']['id'])
+
+
+def service_desk_bound_order(quote_id, require_refund=False):
+    reconciliation = service_desk_reconciliation_service()
+    followups = reconciliation.refund_followups(quote_id).get('followups', [])
+    if len(followups) == 1:
+        return followups[0]['orderNumber']
+    if require_refund:
+        raise ValueError('找不到此報價的退款追蹤紀錄')
+    # The UI history is capped at 100 checks. A binding must survive any number
+    # of later duplicate observations, so resolve it from the persistent ledger.
+    bound = reconciliation.bound_order_number(quote_id)
+    if not bound:
+        raise ValueError('尚未確認唯一付款訂單，請先完成一般核對或漏填備註人工配對')
+    return bound
+
+
+def service_desk_refund_refresh(quote_id, payload, actor='管理員', close=False):
+    required = {'requestId', 'reason', 'confirm'} if close else {'requestId'}
+    if type(payload) is not dict or set(payload) != required:
+        raise ValueError('退款查詢或結案欄位不正確')
+    service_desk_request_id(payload['requestId'])
+    if close and (payload['confirm'] is not True or type(payload['reason']) is not str
+                  or not 5 <= len(payload['reason'].strip()) <= 500):
+        raise ValueError('退款結案須確認並填寫至少 5 字處理說明')
+    wrapper = service_desk_scoped_quote(quote_id)
+    number = service_desk_bound_order(quote_id, require_refund=close)
+    order = service_desk_fetch_exact_order(number)
+    reconciliation = service_desk_reconciliation_service()
+    # Closing never reuses the original payment result or trusts a browser
+    # refund flag; persist a fresh observation first, under a distinct UUID.
+    result = reconciliation.record(order, wrapper, str(uuid.uuid4()) if close else payload['requestId'],
+        provenance={'freshProviderLookup': True, 'readOnly': True})
+    after = service_desk_after_payment(result, wrapper['case']['id'])
+    if close:
+        if order.get('reportedPaymentStatus') != 'refunded':
+            raise ValueError('SHOPLINE 本次尚未回報全額退款完成，不能結案')
+        after['refundClose'] = reconciliation.close_refund(quote_id, payload, actor=actor)
+        after['operations'] = service_desk_refresh_operations(wrapper['case']['id'])
+    after['refunds'] = reconciliation.refund_followups(quote_id)
+    return after
 
 
 def service_desk_automation_status():
@@ -212,39 +346,19 @@ def service_desk_reconcile(quote_id, payload):
     number, request_id = payload['orderNumber'], payload['requestId']
     if type(number) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', number):
         raise ValueError('訂單編號格式不正確')
-    try:
-        valid_request = type(request_id) is str and uuid.UUID(request_id).version == 4 and str(uuid.UUID(request_id)) == request_id
-    except (ValueError, AttributeError, TypeError):
-        valid_request = False
-    if not valid_request:
-        raise ValueError('請求識別碼格式不正確')
-    wrapper = service_desk_service().get_quote(quote_id)
-    if not wrapper:
-        raise ValueError('找不到內測報價')
-    if wrapper['case']['id'] not in SERVICE_DESK_RECONCILIATION_ALLOWED_CASES:
-        raise ValueError('此案件未列入本次真實測試訂單的副本名單')
+    service_desk_request_id(request_id)
+    wrapper = service_desk_scoped_quote(quote_id)
     reconciliation = service_desk_reconciliation_service()
     previous = reconciliation.lookup(request_id, quote_id, number)
     if previous is not None:
-        return {**previous, 'paymentSheetSync': service_desk_enqueue_payment_sheet(wrapper['case']['id'])}
-    if SERVICE_DESK_ORDER_PREVIEW is None:
-        raise ValueError('尚未設定本機唯讀訂單橋接')
+        return service_desk_after_payment(previous, wrapper['case']['id'])
     # The browser supplies no order evidence. Every new attempt requires an
     # exact, authenticated provider GET through the fixed local bridge.
-    state = SERVICE_DESK_ORDER_PREVIEW.fetch({'orderNumber': number})
-    if (type(state) is not dict or state.get('status') != 'ok'
-            or state.get('configured') is not True or state.get('truncated') is not False
-            or state.get('simulation') is not False or state.get('readOnly') is not True
-            or state.get('realPayment') is not False or state.get('releaseAllowed') is not False):
-        raise ValueError('本次 SHOPLINE 唯讀查詢未完成，未採用舊資料配對；請稍後再試')
-    orders = state.get('orders')
-    if (type(orders) is not list or len(orders) != 1
-            or type(orders[0]) is not dict or orders[0].get('orderNumber') != number):
-        raise ValueError('未取得唯一且編號完全相符的維修商品訂單')
+    order = service_desk_fetch_exact_order(number)
     # record re-reads the current case and quote inside its database transaction.
-    result = reconciliation.record(orders[0], wrapper, request_id,
+    result = reconciliation.record(order, wrapper, request_id,
         provenance={'freshProviderLookup': True, 'readOnly': True})
-    return {**result, 'paymentSheetSync': service_desk_enqueue_payment_sheet(wrapper['case']['id'])}
+    return service_desk_after_payment(result, wrapper['case']['id'])
 
 
 def service_desk_payment_sheet_service():
@@ -260,7 +374,7 @@ def service_desk_payment_sheet_service():
 
 
 def service_desk_enqueue_payment_sheet(case_id):
-    if case_id not in SERVICE_DESK_RECONCILIATION_ALLOWED_CASES:
+    if case_id not in service_desk_allowed_case_ids():
         return {'queued': False, 'reason': 'not_in_test_scope'}
     try:
         result = service_desk_payment_sheet_service().enqueue(case_id)
@@ -278,7 +392,7 @@ def service_desk_enqueue_payment_sheet(case_id):
 def service_desk_payment_sheet_state():
     service = service_desk_payment_sheet_service()
     state = service.preview()
-    allowed = SERVICE_DESK_RECONCILIATION_ALLOWED_CASES
+    allowed = service_desk_allowed_case_ids()
     state['rows'] = [row for row in state.get('rows', []) if row.get('caseId') in allowed]
     state['queue'] = [{**row, 'status': 'failed' if row.get('lastError') else 'pending'}
                       for row in service.pending().get('rows', []) if row.get('caseId') in allowed]
@@ -1183,8 +1297,11 @@ class Handler(BaseHTTPRequestHandler):
                 status = parameters.get('status', [''])[0]
                 if len(keyword) > 200 or len(status) > 64:
                     raise ValueError('搜尋條件過長')
+                line_status = service_desk_line_test_status()
                 return self.payment_lab_send(200, {**service_desk_service().state(keyword, status),
-                    'environment': 'cloud_internal_test' if SERVICE_DESK_CLOUD_INTERNAL else 'local_internal_test'})
+                    'environment': 'cloud_internal_test' if SERVICE_DESK_CLOUD_INTERNAL else 'local_internal_test',
+                    'recipientMode': line_status.get('recipientMode', 'allowlisted_test_only'),
+                    'recipientLabel': line_status.get('recipientLabel', '指定內測 LINE')})
             if query:
                 raise ValueError('此操作不接受搜尋條件')
             if path == '/api/service-desk/line-test/status':
@@ -1195,6 +1312,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.payment_lab_send(200, service_desk_payment_sheet_state())
             if path == '/api/service-desk/automation/state':
                 return self.payment_lab_send(200, service_desk_automation_status())
+            if path == '/api/service-desk/operations/state':
+                if SERVICE_DESK_OPERATIONS is None:
+                    return self.payment_lab_send(503, {'error': '內測派車門檻尚未設定'})
+                return self.payment_lab_send(200, SERVICE_DESK_OPERATIONS.state())
+            operation_route = re.fullmatch(r'/api/service-desk/cases/([A-Za-z0-9-]{1,64})/operations', path)
+            if operation_route:
+                if operation_route.group(1) not in service_desk_allowed_case_ids():
+                    raise ValueError('此案件未列入內測作業名單')
+                if SERVICE_DESK_OPERATIONS is None:
+                    return self.payment_lab_send(503, {'error': '內測派車門檻尚未設定'})
+                return self.payment_lab_send(200, SERVICE_DESK_OPERATIONS.case_state(operation_route.group(1)))
+            refund_route = re.fullmatch(r'/api/service-desk/quotes/([A-Za-z0-9-]{1,64})/refunds', path)
+            if refund_route:
+                service_desk_scoped_quote(refund_route.group(1))
+                return self.payment_lab_send(200, service_desk_reconciliation_service().refund_followups(refund_route.group(1)))
             history_route = re.fullmatch(r'/api/service-desk/quotes/([A-Za-z0-9-]{1,64})/reconciliation', path)
             if history_route:
                 identity = history_route.group(1)
@@ -1220,10 +1352,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.payment_lab_admin():
             return
         route = re.fullmatch(
-            r'/api/service-desk/(cases|quotes|orders)/([A-Za-z0-9-]{1,64})/(quote|notify|simulate|bind|line-test|reconcile)', path)
+            r'/api/service-desk/(cases|quotes|orders)/([A-Za-z0-9-]{1,64})/(quote|notify|simulate|bind|line-test|reconcile|manual-match|refund-refresh|refund-close|dispatch|refund-action)', path)
         allowed = {('cases', 'quote'), ('quotes', 'notify'), ('quotes', 'simulate'),
-                   ('orders', 'bind'), ('quotes', 'line-test'), ('quotes', 'reconcile')}
-        if (path not in ('/api/service-desk/cases', '/api/service-desk/shopline/fetch', '/api/service-desk/payment-sheet/prepare')
+                   ('orders', 'bind'), ('quotes', 'line-test'), ('quotes', 'reconcile'),
+                   ('quotes', 'manual-match'), ('quotes', 'refund-refresh'), ('quotes', 'refund-close'),
+                   ('cases', 'dispatch'), ('cases', 'refund-action')}
+        if (path not in ('/api/service-desk/cases', '/api/service-desk/shopline/fetch',
+                        '/api/service-desk/payment-sheet/prepare', '/api/service-desk/intake-invites')
                 and (not route or (route.group(1), route.group(3)) not in allowed)):
             return self.payment_lab_send(404, {'error': '找不到頁面'})
         if self.headers.get_all('Origin', []) != [BASE]:
@@ -1260,14 +1395,39 @@ class Handler(BaseHTTPRequestHandler):
                 except PreviewBusy:
                     return self.payment_lab_send(429, {'error': '請稍候再讀取訂單'}, {'Retry-After': '30'})
             service = service_desk_service()
+            if path == '/api/service-desk/intake-invites':
+                if set(data) != {'requestId'}:
+                    raise ValueError('內測邀請只接受本次請求識別碼')
+                service_desk_request_id(data['requestId'])
+                if SERVICE_DESK_TEST_INTAKE is None:
+                    return self.payment_lab_send(503, {'error': '內測客戶綁定尚未設定'})
+                return self.payment_lab_send(201, SERVICE_DESK_TEST_INTAKE.create_invite(data['requestId']))
             if path == '/api/service-desk/payment-sheet/prepare':
                 if (set(data) != {'caseId'} or type(data['caseId']) is not str
-                        or data['caseId'] not in SERVICE_DESK_RECONCILIATION_ALLOWED_CASES):
+                        or data['caseId'] not in service_desk_allowed_case_ids()):
                     raise ValueError('付款同步僅接受本次內測案件副本，不接受付款狀態或金額')
                 return self.payment_lab_send(200, service_desk_enqueue_payment_sheet(data['caseId']))
             if path == '/api/service-desk/cases':
                 return self.payment_lab_send(201, service.create_case(data))
             identity, action = route.group(2), route.group(3)
+            if action in ('dispatch', 'refund-action'):
+                if identity not in service_desk_allowed_case_ids():
+                    raise ValueError('此案件未列入內測作業名單')
+                if SERVICE_DESK_OPERATIONS is None:
+                    return self.payment_lab_send(503, {'error': '內測派車門檻尚未設定'})
+                operator = self.user().get('name') or self.user().get('displayName') or '管理員'
+                callback = (SERVICE_DESK_OPERATIONS.mark_dispatched if action == 'dispatch'
+                            else SERVICE_DESK_OPERATIONS.record_refund_action)
+                return self.payment_lab_send(200, callback(identity, data, actor=operator))
+            if action in ('manual-match', 'refund-refresh', 'refund-close'):
+                from shopline_preview import PreviewBusy
+                operator = self.user().get('name') or self.user().get('displayName') or '管理員'
+                try:
+                    result = (service_desk_manual_match(identity, data, operator) if action == 'manual-match'
+                              else service_desk_refund_refresh(identity, data, operator, close=action == 'refund-close'))
+                    return self.payment_lab_send(200, result)
+                except PreviewBusy:
+                    return self.payment_lab_send(429, {'error': '請稍候再核對 SHOPLINE；本次未採用舊資料'}, {'Retry-After': '30'})
             if action == 'reconcile':
                 from shopline_preview import PreviewBusy
                 try:
@@ -1293,6 +1453,7 @@ class Handler(BaseHTTPRequestHandler):
             result = callbacks[action](identity, data)
             if action == 'quote':
                 result['paymentSheetSync'] = service_desk_enqueue_payment_sheet(identity)
+                result['operations'] = service_desk_refresh_operations(identity)
             if action in ('quote', 'notify') and result.get('quote'):
                 result['automation'] = service_desk_enqueue_automation(result['quote']['id'], retry=action == 'notify')
             return self.payment_lab_send(200, result)

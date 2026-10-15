@@ -54,10 +54,8 @@ class PaymentSheetWorker:
                 or not isinstance(secret, str)
                 or re.fullmatch(r'[A-Za-z0-9_-]{32,128}', secret) is None):
             raise ValueError('付款自動同步只允許已指定的雲端內測副本與有效設定')
-        if (not isinstance(allowed_case_ids, (set, frozenset, list, tuple))
-                or not 1 <= len(allowed_case_ids) <= 100
-                or not all(_case_id(value) for value in allowed_case_ids)):
-            raise ValueError('付款自動同步必須明確指定內部案件副本')
+        self._scope_reader = allowed_case_ids if callable(allowed_case_ids) else lambda: allowed_case_ids
+        self._scope()
         if (isinstance(interval_seconds, bool) or not isinstance(interval_seconds, (int, float))
                 or not math.isfinite(interval_seconds) or not 1 <= interval_seconds <= 60
                 or type(batch_size) is not int or not 1 <= batch_size <= 20
@@ -66,7 +64,7 @@ class PaymentSheetWorker:
                        for name in ('enqueue', 'pending', 'ack', 'mark_failed'))):
             raise ValueError('付款自動同步背景工作設定不正確')
         self._sync, self._endpoint, self._secret = sync, endpoint, secret
-        self._sheet_id, self._allowed = sheet_id, frozenset(allowed_case_ids)
+        self._sheet_id = sheet_id
         self._interval, self._batch_size = float(interval_seconds), batch_size
         self._transport, self._monotonic = transport, monotonic
         self._stop, self._wake = threading.Event(), threading.Event()
@@ -77,12 +75,19 @@ class PaymentSheetWorker:
                        'deliveredCount': 0, 'failedCount': 0, 'skippedCount': 0,
                        'lastResult': 'idle', 'inFlight': False}
 
+    def _scope(self):
+        values = self._scope_reader()
+        if (not isinstance(values, (set, frozenset, list, tuple))
+                or not 1 <= len(values) <= 100 or not all(_case_id(value) for value in values)):
+            raise ValueError('付款自動同步必須明確指定內部案件副本')
+        return frozenset(values)
+
     def status(self):
         with self._state_lock:
             running = self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
             return {'configured': True, 'automaticDeliveryEnabled': running,
                     'running': running, 'sheetId': self._sheet_id,
-                    'allowedCaseCount': len(self._allowed), 'internalOnly': True,
+                    'allowedCaseCount': len(self._scope()), 'internalOnly': True,
                     'productionPaymentRecognized': False, 'releaseAllowed': False,
                     **self._state}
 
@@ -173,7 +178,7 @@ class PaymentSheetWorker:
                 if self._stop.is_set():
                     break
                 case_id, revision = item.get('caseId'), item.get('revision')
-                if case_id not in self._allowed:
+                if case_id not in self._scope():
                     summary['skipped'] += 1
                     continue
                 if eligible >= self._batch_size:
@@ -193,6 +198,9 @@ class PaymentSheetWorker:
                     if record['revision'] != revision:
                         raise ValueError('invalid_revision')
                     sent_record = copy.deepcopy(record)
+                    if case_id not in self._scope():
+                        summary['skipped'] += 1
+                        continue
                     with self._state_lock:
                         self._state.update(lastAttemptAt=_now(), inFlight=True)
                     result = self._transport(self._endpoint, self._secret, self._sheet_id,

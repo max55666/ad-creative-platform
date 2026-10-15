@@ -59,13 +59,13 @@ class ServiceDeskAutomation:
             raise ValueError('內測自動流程的服務設定不正確')
         if (type(enabled) is not bool or type(poll_interval) is not int
                 or not 60 <= poll_interval <= 3600
-                or not isinstance(allowed_case_ids, (set, frozenset, list, tuple))
-                or not 1 <= len(allowed_case_ids) <= 100
-                or any(not _identity(case_id, 'WB-') for case_id in allowed_case_ids)):
+                or (not callable(allowed_case_ids) and (not isinstance(allowed_case_ids, (set, frozenset, list, tuple))
+                    or not 1 <= len(allowed_case_ids) <= 100
+                    or any(not _identity(case_id, 'WB-') for case_id in allowed_case_ids)))):
             raise ValueError('內測自動流程必須設定有限的案件副本名單')
         self.connection_factory, self.quote_reader = connection_factory, quote_reader
         self.line_sender, self.order_provider, self.reconcile = line_sender, order_provider, reconcile
-        self.allowed = frozenset(allowed_case_ids)
+        self.allowed = allowed_case_ids if callable(allowed_case_ids) else frozenset(allowed_case_ids)
         self.enabled, self.clock, self.poll_interval = enabled, clock, poll_interval
         self._owner = str(uuid.uuid4())
         self._cycle_lock = threading.Lock()
@@ -115,6 +115,8 @@ class ServiceDeskAutomation:
                 next_attempt REAL NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(quote_id,order_number))''')
             c.execute('CREATE TABLE IF NOT EXISTS wb_auto_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+            if 'last_checked' not in {row['name'] for row in c.execute('PRAGMA table_info(wb_auto_order_jobs)')}:
+                c.execute('ALTER TABLE wb_auto_order_jobs ADD COLUMN last_checked REAL NOT NULL DEFAULT 0')
             row = c.execute("SELECT file FROM pragma_database_list WHERE name='main'").fetchone()
             self._db_key = os.path.normcase(os.path.realpath(row['file'])) if row and row['file'] else id(self.connection_factory)
         return self.status()
@@ -138,7 +140,11 @@ class ServiceDeskAutomation:
         for part in (wrapper, quote, case):
             if any(part.get(k) is not v for k, v in (('internalOnly', True), ('simulation', True), ('realPayment', False), ('releaseAllowed', False))):
                 raise ValueError('只接受隔離內測報價')
-        if (case.get('id') not in self.allowed or case.get('source') != 'snapshot'
+        allowed = self.allowed() if callable(self.allowed) else self.allowed
+        if (not isinstance(allowed, (set, frozenset, list, tuple)) or not 1 <= len(allowed) <= 100
+                or any(not _identity(case_id, 'WB-') for case_id in allowed)):
+            raise ValueError('內測自動流程的動態案件名單不正確')
+        if (case.get('id') not in allowed or case.get('source') not in ('snapshot', 'test_intake')
                 or quote.get('id') != quote_id or quote.get('caseId') != case.get('id')
                 or quote.get('status') != 'active'
                 or type(case.get('latestQuote')) is not dict or case['latestQuote'].get('id') != quote_id
@@ -334,8 +340,10 @@ class ServiceDeskAutomation:
                 self._set(c, 'last_error', 'provider_lookup_failed')
             return True
         with self._connection(True) as c:
-            c.execute("UPDATE wb_auto_order_jobs SET status='done',attempts=attempts+1,last_error='' WHERE quote_id=? AND order_number=?", (job['quote_id'], job['order_number']))
+            c.execute("UPDATE wb_auto_order_jobs SET status='done',attempts=attempts+1,last_error='',last_checked=? WHERE quote_id=? AND order_number=?", (now, job['quote_id'], job['order_number']))
             prior = c.execute('SELECT payment_status,order_number FROM wb_auto_enrollments WHERE quote_id=?', (job['quote_id'],)).fetchone()
+            if prior and prior['payment_status'] == 'refund_needs_review' and prior['order_number'] == job['order_number']:
+                payment = 'refund_needs_review'
             if prior and prior['payment_status'] in ('paid_internal_only', 'refund_needs_review') and prior['order_number'] != job['order_number']:
                 c.execute('UPDATE wb_auto_enrollments SET checked_at=? WHERE quote_id=?', (now, job['quote_id']))
             else:
@@ -374,6 +382,9 @@ class ServiceDeskAutomation:
             self._set(c, 'last_error', '')
             for wrapper in wrappers:
                 quote, case = wrapper['quote'], wrapper['case']
+                table = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_real_order_checks'").fetchone()
+                bound = c.execute("SELECT order_id,order_number FROM wb_real_order_checks WHERE quote_id=? AND outcome='matched_internal_only' LIMIT 1",
+                                  (quote['id'],)).fetchone() if table else None
                 for order in orders:
                     if type(order) is not dict or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', order.get('orderNumber', '')):
                         continue
@@ -383,7 +394,8 @@ class ServiceDeskAutomation:
                     contact = bool(phone and phone in (normalize_phone(order.get('customerPhone', '')), normalize_phone(order.get('recipientPhone', ''))))
                     exact = references == {quote['caseNumber']}
                     fallback = not references and contact and case.get('name') in (order.get('customerName'), order.get('recipientName'))
-                    if not contact or not (exact or fallback):
+                    is_bound = bool(bound and bound['order_id'] == order.get('id') and bound['order_number'] == order['orderNumber'])
+                    if not is_bound and (not contact or not (exact or fallback)):
                         continue
                     # Fallbacks are recorded by the strict reconciliation service
                     # as needs_review; they can never auto-pass its remark checks.
@@ -403,6 +415,19 @@ class ServiceDeskAutomation:
                         observation_hash=excluded.observation_hash,request_id=excluded.request_id,
                         status='queued',attempts=0,next_attempt=0,last_error='' ''',
                         (quote['id'], order['orderNumber'], fingerprint, str(uuid.uuid4())))
+                if bound:
+                    prior = c.execute('SELECT * FROM wb_auto_order_jobs WHERE quote_id=? AND order_number=?',
+                                      (quote['id'], bound['order_number'])).fetchone()
+                    # Already accepted orders may age out of the rolling scan or
+                    # have their contact/remarks edited. Re-read their exact ID
+                    # periodically so refunds still revoke the internal gate.
+                    if prior is None or (prior['status'] == 'done' and prior['last_checked'] <= now - 900):
+                        fingerprint = 'bound-periodic:' + str(int(now // 900))
+                        c.execute('''INSERT INTO wb_auto_order_jobs(quote_id,order_number,observation_hash,request_id,status)
+                            VALUES(?,?,?,?,'queued') ON CONFLICT(quote_id,order_number) DO UPDATE SET
+                            observation_hash=excluded.observation_hash,request_id=excluded.request_id,
+                            status='queued',attempts=0,next_attempt=0,last_error='' ''',
+                            (quote['id'], bound['order_number'], fingerprint, str(uuid.uuid4())))
 
     def run_once(self):
         if not self.enabled or not self._cycle_lock.acquire(blocking=False):

@@ -247,6 +247,54 @@ class ServiceDesk:
             self._remember(c, request_id, 'create_case', payload, case_id)
             return {**FLAGS, 'case': self._case(c, case_id), 'idempotent': False}
 
+    def create_verified_intake(self, payload, identity, request_id):
+        """Internal intake; identity must come from the host's verified LINE session."""
+        _object(payload, ('name', 'phone', 'address', 'model', 'shipping',
+                'originalOrderNumber', 'problem', 'consent'),
+                ('name', 'phone', 'address', 'model', 'shipping', 'consent'))
+        if type(identity) is not dict:
+            raise ValueError('請先完成內測 LINE 身分驗證')
+        customer_id = _id(identity.get('customerId'), 'WC-')
+        display_name = _text(identity.get('displayName', ''), 100, 1)
+        if payload['consent'] is not True or payload['shipping'] not in ('pickup', 'self'):
+            raise ValueError('請選擇送修方式並同意內測資料處理')
+        name, phone = _text(payload['name'], 100, 1), normalize_phone(_text(payload['phone'], 40, 1))
+        address, model = _text(payload['address'], 500, 1), _text(payload['model'], 100, 1)
+        if not name or not phone or not address or not model or not display_name:
+            raise ValueError('請填寫姓名、有效行動電話、地址與機型')
+        request_id = _request_id(request_id)
+        request_payload = {'form': payload, 'customerId': customer_id}
+        with self._connection(True) as c:
+            prior = self._request(c, request_id, 'verified_intake', request_payload)
+            if prior:
+                return {**FLAGS, 'case': self._case(c, prior), 'idempotent': True}
+            counts = c.execute('''SELECT COUNT(*) AS total,
+                SUM(CASE WHEN json_extract(data,'$.customerId')=? THEN 1 ELSE 0 END) AS customer_total
+                FROM wb_cases WHERE json_extract(data,'$.source')='test_intake' ''', (customer_id,)).fetchone()
+            if counts['total'] >= 90 or (counts['customer_total'] or 0) >= 5:
+                raise ValueError('內測案件已達數量限制，請聯絡管理員整理既有內測案件')
+            c.execute('CREATE TABLE IF NOT EXISTS wb_intake_sequence (day TEXT PRIMARY KEY,sequence INTEGER NOT NULL)')
+            day = datetime.now(TAIPEI).strftime('%Y%m%d')
+            c.execute('INSERT OR IGNORE INTO wb_intake_sequence(day,sequence) VALUES(?,8999)', (day,))
+            while True:
+                seq = c.execute('SELECT sequence FROM wb_intake_sequence WHERE day=?', (day,)).fetchone()['sequence'] + 1
+                if seq > 9999:
+                    raise ValueError('今日內測案件編號已用完')
+                c.execute('UPDATE wb_intake_sequence SET sequence=? WHERE day=?', (seq, day))
+                number = 'R' + day + '-' + str(seq)
+                if not c.execute("SELECT 1 FROM wb_cases WHERE json_extract(data,'$.caseNumber')=?", (number,)).fetchone():
+                    break
+            data = {'caseNumber': number, 'name': name, 'phone': phone, 'address': address,
+                'model': model, 'pickup': payload['shipping'] == 'pickup',
+                'originalOrderNumber': _text(payload.get('originalOrderNumber', ''), 100),
+                'problem': _text(payload.get('problem', ''), 2000),
+                'source': 'test_intake', 'lineLinked': True, 'lineName': display_name,
+                'customerId': customer_id}
+            case_id = self._insert_case(c, data)
+            self._audit(c, case_id, 'verified_test_intake', '經內測 LINE 驗證建立；僅限獨立內測站')
+            self._remember(c, request_id, 'verified_intake', request_payload, case_id)
+            return {**FLAGS, 'case': self._case(c, case_id), 'idempotent': False}
+
     def _quote(self, c, quote_id):
         row = c.execute('SELECT * FROM wb_quotes WHERE id=?', (quote_id,)).fetchone()
         if row is None:
@@ -345,6 +393,10 @@ class ServiceDesk:
                 raise ValueError('報價版本已變更，請重新整理案件後再核定')
             if case['latestQuote'] and (case['latestQuote']['acceptedOrderId'] or case['latestQuote']['paymentStatus'] == 'no_payment_required'):
                 raise ValueError('已核對付款或免付款的案件不能直接改價，請先交由主管處理')
+            real_checks = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_real_order_checks'").fetchone()
+            if real_checks and case['latestQuote'] and c.execute("SELECT 1 FROM wb_real_order_checks WHERE quote_id=? AND outcome='matched_internal_only' LIMIT 1",
+                    (case['latestQuote']['id'],)).fetchone():
+                raise ValueError('此報價已有真實訂單配對或退款追蹤，不能直接改價，請先交由主管處理')
             pickup_fee = 350 if case['pickup'] else 0
             total = fee + pickup_fee
             message, remark = self._message(case, fee, pickup_fee, total)

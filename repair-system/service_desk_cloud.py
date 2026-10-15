@@ -23,7 +23,8 @@ import sqlite3
 import stat
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
+from http.cookies import SimpleCookie
 import uuid
 
 DATA_DIRECTORY = Path('/var/data/service-desk')
@@ -37,7 +38,7 @@ _SEED_TABLES = frozenset({'wb_cases', 'wb_quotes', 'wb_notifications',
     'wb_payment_sheet_state', 'wb_payment_sheet_outbox'})
 _CONFIG_KEYS = frozenset({'adminPassword', 'shoplineApiToken', 'lineAccessToken',
     'testLineUserId', 'recipientLabel', 'testSheetEndpoint', 'testSheetSecret',
-    'enableAutomation'})
+    'enableAutomation', 'testLoginChannelId', 'testLoginChannelSecret'})
 _CONTROL = re.compile(r'[\x00-\x20\x7f]')
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 _HOP_HEADERS = {'connection', 'keep-alive', 'proxy-authenticate',
@@ -185,6 +186,8 @@ class Configuration:
     sheet_endpoint: str = field(default='', repr=False)
     sheet_secret: str = field(default='', repr=False)
     automation_enabled: bool = False
+    test_login_id: str = field(default='', repr=False)
+    test_login_secret: str = field(default='', repr=False)
 
     @classmethod
     def load(cls, environ=None):
@@ -227,10 +230,17 @@ class Configuration:
                     or not isinstance(secret, str) or re.fullmatch(r'[A-Za-z0-9_-]{32,128}', secret) is None):
                 _fail()
         enabled = settings.get('enableAutomation', False)
+        login_id = settings.get('testLoginChannelId', '')
+        login_secret = settings.get('testLoginChannelSecret', '')
+        if (not isinstance(login_id, str) or not isinstance(login_secret, str)
+                or bool(login_id) != bool(login_secret)
+                or login_id and (not re.fullmatch(r'[0-9]{6,15}', login_id)
+                    or not _credential(login_secret, 16, 256))):
+            _fail()
         if enabled and not all((shopline, line, user, endpoint, secret)):
             _fail()
         return cls(_public_url(env.get('SERVICE_DESK_PUBLIC_URL') or env.get('RENDER_EXTERNAL_URL')),
-                   password, shopline, line, user, endpoint, secret, enabled)
+                   password, shopline, line, user, endpoint, secret, enabled, login_id, login_secret)
 
 
 def _database_valid(path, allowed_tables=None):
@@ -383,16 +393,33 @@ def bootstrap(*, config=None, data_dir=DATA_DIRECTORY, seed_path=None, start_wor
     with _bootstrap_stage('adapters'):
         from shopline_preview import ShoplinePreview
         from shopline_orders import fetch_repair_orders
-        from line_test_sender import LineTestSender
+        from line_case_test_sender import CaseBoundTestSender
+        from service_desk_intake import TestIntake
+        from service_desk_operations import ServiceDeskOperations
+        import line_support
         desk = server.service_desk_service()
+        intake = TestIntake(server.service_desk_connect, public_url=config.public_url,
+            channel_id=config.test_login_id, channel_secret=config.test_login_secret,
+            id_verifier=line_support.verify_id_token,
+            profile_reader=lambda uid: line_support.get_profile(config.line_token, uid),
+            legacy_case=APPROVED_CASE_ID if config.line_user else '', legacy_user=config.line_user)
+        intake.init()
+        server.SERVICE_DESK_TEST_INTAKE = intake
+        server.SERVICE_DESK_RECONCILIATION_ALLOWED_CASES = lambda: intake.allowed_case_ids() | {APPROVED_CASE_ID}
         server.SERVICE_DESK_ORDER_PREVIEW = ShoplinePreview(lambda: config.shopline_token,
             lambda: desk.state()['cases'], fetch_repair_orders)
-        server.SERVICE_DESK_LINE_TEST_SENDER = LineTestSender(token=config.line_token,
-            allowed_user_id=config.line_user, recipient_label='Max🚀', allow_actual_test=bool(config.line_token))
+        server.SERVICE_DESK_LINE_TEST_SENDER = CaseBoundTestSender(token=config.line_token,
+            recipient_resolver=intake.recipient)
         server.SERVICE_DESK_PAYMENT_SHEET_TARGET = {'sheetId': TEST_SHEET_ID,
             'url': 'https://docs.google.com/spreadsheets/d/' + TEST_SHEET_ID + '/edit#gid=515406948'}
         server.service_desk_reconciliation_service()
         sync = server.service_desk_payment_sheet_service()
+        operations = ServiceDeskOperations(server.service_desk_connect,
+            quote_reader=lambda cid: (lambda data: {'case': data['case'], 'quote': data['case'].get('latestQuote')})(desk.get_case(cid)),
+            payment_reader=lambda cid: next(iter(sync.preview(cid)['rows']), None),
+            allowed_case_ids=lambda cid: cid in server.service_desk_allowed_case_ids())
+        operations.init()
+        server.SERVICE_DESK_OPERATIONS = operations
         runtime = Runtime(server, config)
         if config.sheet_endpoint:
             from payment_sheet_worker import PaymentSheetWorker
@@ -490,6 +517,123 @@ def _json_response(start_response, status, payload, head=False):
         json.dumps(payload, ensure_ascii=False).encode('utf-8'), head)
 
 
+_INTAKE_PATHS = frozenset({'/test-application', '/test-line-login', '/test-line-callback',
+    '/api/test-intake/session', '/api/test-intake/cases', '/api/test-intake/logout'})
+
+
+def _cookie(headers, name):
+    values = headers.get_all('Cookie', [])
+    if len(values) > 1 or any(len(value) > 8192 for value in values):
+        raise RequestRejected(400)
+    parsed = SimpleCookie()
+    try:
+        parsed.load(values[0] if values else '')
+        return parsed[name].value if name in parsed else ''
+    except Exception:
+        raise RequestRejected(400) from None
+
+
+def _set_cookie(name, value, maximum=86400):
+    # All values are server-generated opaque tokens, never identity/contact data.
+    if value and re.fullmatch(r'[A-Za-z0-9_-]{43}', value) is None:
+        raise ValueError('Invalid internal session')
+    return ('Set-Cookie', name + '=' + value + '; Path=/; Max-Age=' + str(maximum)
+            + '; Secure; HttpOnly; SameSite=Lax')
+
+
+def _intake_request(current, path, query, method, headers, body, start_response, head):
+    intake = getattr(current.server, 'SERVICE_DESK_TEST_INTAKE', None)
+    if intake is None:
+        raise RequestRejected(503)
+    session = _cookie(headers, 'wb_intake_session')
+    identity = intake.identity(session) if session else None
+    if path == '/test-application':
+        try:
+            parameters = parse_qs(query, keep_blank_values=True, strict_parsing=bool(query), max_num_fields=2)
+        except ValueError:
+            raise RequestRejected(400) from None
+        if set(parameters) - {'invite', 'login'} or any(len(v) != 1 for v in parameters.values()):
+            raise RequestRejected(400)
+        response_headers = [('Content-Type', 'text/html; charset=utf-8'),
+            ('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")]
+        if 'invite' in parameters:
+            if not intake.valid_invite(parameters['invite'][0]):
+                raise RequestRejected(403)
+            response_headers.append(_set_cookie('wb_intake_invite', parameters['invite'][0]))
+            # Strip the invitation capability from the address bar before rendering.
+            return _response(start_response, 303, response_headers + [('Location', '/test-application')], b'', head)
+        if parameters.get('login', [''])[0] not in ('', 'failed'):
+            raise RequestRejected(400)
+        content = (Path(__file__).parent / 'test-application.html').read_bytes()
+        return _response(start_response, 200, response_headers, content, head)
+    if path == '/test-line-login':
+        if query:
+            raise RequestRejected(400)
+        try:
+            state, destination = intake.start(_cookie(headers, 'wb_intake_invite'))
+        except ValueError:
+            raise RequestRejected(403) from None
+        return _response(start_response, 303, [('Location', destination),
+            _set_cookie('wb_intake_state', state, 600)], b'', head)
+    if path == '/test-line-callback':
+        if len(query) > 4096:
+            raise RequestRejected(400)
+        try:
+            parameters = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=8)
+            if (set(parameters) - {'code', 'state', 'error', 'error_description', 'friendship_status_changed', 'scope'}
+                    or any(len(v) != 1 for v in parameters.values()) or 'error' in parameters):
+                raise ValueError()
+            token = intake.finish(parameters.get('state', [''])[0],
+                _cookie(headers, 'wb_intake_state'), parameters.get('code', [''])[0])
+        except (ValueError, TypeError):
+            return _response(start_response, 303, [('Location', '/test-application?login=failed'),
+                _set_cookie('wb_intake_state', '', 0)], b'', head)
+        return _response(start_response, 303, [('Location', '/test-application'),
+            _set_cookie('wb_intake_session', token), _set_cookie('wb_intake_state', '', 0)], b'', head)
+    if query:
+        raise RequestRejected(400)
+    if path == '/api/test-intake/session':
+        invited = intake.valid_invite(_cookie(headers, 'wb_intake_invite'))
+        return _json_response(start_response, 200, {'configured': intake.configured(),
+            'authenticated': bool(identity), 'profile': {'displayName': identity['displayName']} if identity else None,
+            'customerSession': bool(identity), 'formEnabled': bool(identity), 'invited': invited,
+            'source': 'test_intake', 'internalOnly': True}, head)
+    if headers.get_content_type() != 'application/json' or not body:
+        raise RequestRejected(400)
+    try:
+        payload = json.loads(body.decode('utf-8'), object_pairs_hook=_unique,
+            parse_constant=lambda value: _fail())
+    except (ValueError, UnicodeError):
+        raise RequestRejected(400) from None
+    if type(payload) is not dict:
+        raise RequestRejected(400)
+    if path == '/api/test-intake/logout':
+        if payload:
+            raise RequestRejected(400)
+        intake.logout(session)
+        return _response(start_response, 200, [('Content-Type', 'application/json'),
+            _set_cookie('wb_intake_session', '', 0)], b'{"ok":true}', head)
+    if identity is None:
+        raise RequestRejected(401)
+    if (set(payload) != {'name', 'phone', 'address', 'model', 'shipping', 'originalOrderNumber',
+            'problem', 'consent', 'requestId'} or payload.get('consent') is not True):
+        raise RequestRejected(400)
+    request_id = payload.pop('requestId')
+    try:
+        # The service deduplicates one customer's request before inserting.
+        result = current.server.service_desk_service().create_verified_intake(payload, identity, request_id)
+        intake.consent(identity['customerId'])
+        case = result.get('case', result)
+        case_id = case['id']
+        current.server.service_desk_enqueue_payment_sheet(case_id)
+        operations = getattr(current.server, 'SERVICE_DESK_OPERATIONS', None)
+        if operations is not None:
+            operations.refresh(case_id)
+        return _json_response(start_response, 200, {'case': case, 'internalOnly': True}, head)
+    except (ValueError, TypeError, KeyError):
+        raise RequestRejected(400) from None
+
+
 def create_app(runtime=None, runtime_factory=bootstrap):
     """Lazy bootstrap keeps import inert and starts threads inside the worker."""
     lock = threading.Lock()
@@ -504,11 +648,13 @@ def create_app(runtime=None, runtime_factory=bootstrap):
             target = _target(environ)
             parsed = urlsplit(target)
             path = parsed.path
-            if (path not in ('/', '/admin/service-desk', '/api/admin-login', '/api/logout', '/healthz')
+            if (path not in ('/', '/admin/service-desk', '/api/admin-login', '/api/logout', '/healthz') and path not in _INTAKE_PATHS
                     and not path.startswith('/api/service-desk/')):
                 raise RequestRejected(404)
             if ((path in ('/', '/admin/service-desk', '/healthz') and method == 'POST')
                     or path in ('/api/admin-login', '/api/logout') and method != 'POST'):
+                raise RequestRejected(405)
+            if path in _INTAKE_PATHS and ((path in ('/api/test-intake/cases', '/api/test-intake/logout')) != (method == 'POST')):
                 raise RequestRejected(405)
             if path in ('/', '/admin/service-desk', '/api/admin-login', '/api/logout', '/healthz') and parsed.query:
                 raise RequestRejected(400)
@@ -531,6 +677,8 @@ def create_app(runtime=None, runtime_factory=bootstrap):
             if method == 'POST' and headers.get_all('Origin', []) != [current.config.public_url]:
                 raise RequestRejected(403)
             body = _body(environ, headers)
+            if path in _INTAKE_PATHS:
+                return _intake_request(current, path, parsed.query, method, headers, body, start_response, head)
             if path == '/':
                 return _response(start_response, 303, [('Location', '/admin/service-desk')], b'', head)
             if path == '/healthz':
