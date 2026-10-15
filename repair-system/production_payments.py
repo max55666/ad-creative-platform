@@ -513,6 +513,66 @@ class ProductionPayments:
         self.wake()
         self.sheet.stop()
 
+    @staticmethod
+    def _notification_display(message=None):
+        status = message['status'] if message else 'not_queued'
+        labels = {
+            'not_queued': '尚未排程 LINE 通知。',
+            'pending': 'LINE 通知等待傳送。',
+            'working': 'LINE 通知正在傳送，結果尚未確認。',
+            'retry': 'LINE 通知等待使用原識別碼重試，結果尚未確認。',
+            'accepted': 'LINE 平台已接受通知；尚未確認送達或已讀。',
+            'failed': 'LINE 通知傳送失敗，請由客服確認。',
+            'cancelled': 'LINE 通知已停止，未認定為已送達。',
+        }
+        return {'mode': 'production', 'status': status,
+            'attempts': message.get('attempts', 0) if message else 0,
+            'lastError': message.get('last_error', '') if message else '',
+            'acceptedAt': message.get('accepted_at', '') if message and status == 'accepted' else '',
+            'message': labels.get(status, 'LINE 通知狀態待確認。')}
+
+    @classmethod
+    def _quote_display(cls, quote, messages):
+        if quote is None:
+            return None
+        current = next((message for message in messages
+            if message['kind'] == 'quote' and message['quote_id'] == quote['id']), None)
+        notification = cls._notification_display(current)
+        if quote['total'] == 0 and current is None:
+            notification.update(status='not_required', message='本次核定免付款，無須發送付款連結。')
+        # Replace only the public projection. The calculation engine and its
+        # original stored audit remain intact for reproducible verification.
+        return {**quote, 'notification': notification}
+
+    @classmethod
+    def _audit_display(cls, audit, messages):
+        rows = []
+        kind_labels = {'quote': '付款通知', 'receipt': '付款確認', 'refund': '退款通知'}
+        for message in messages:
+            if message['kind'] not in kind_labels:
+                continue
+            notice = cls._notification_display(message)
+            rows.append({'action': 'production_line_' + message['kind'] + '_' + notice['status'],
+                'createdAt': notice['acceptedAt'],
+                'detail': kind_labels[message['kind']] + '：' + notice['message']})
+        for entry in audit:
+            action = entry.get('action', '')
+            # These are calculation-engine exercises, not production transport
+            # evidence. Actual delivery status is taken from the outbox above.
+            if action in ('notification_simulated', 'notification_failed'):
+                continue
+            entry = dict(entry)
+            if action == 'case_created':
+                entry['detail'] = '建立付款核對紀錄'
+            elif action == 'real_order_check_matched_internal_only':
+                entry['detail'] = '付款訂單已核對配對；目前結果請見付款狀態。'
+            elif action == 'real_order_check_duplicate':
+                entry['detail'] = '付款訂單已重新核對，保留原配對紀錄。'
+            elif action == 'real_order_check_blocked':
+                entry['detail'] = '訂單核對結果已記錄；目前結果請見付款與退款狀態。'
+            rows.append(entry)
+        return rows[:100]
+
     def detail(self, real_id):
         case = self._repair(real_id)
         data = _case_data(case)
@@ -527,7 +587,7 @@ class ProductionPayments:
         if link:
             detail = self.desk.get_case(link['wb_id'])
             result.update(version=detail['case']['version'], quote=detail['case']['latestQuote'],
-                quoteHistory=detail['quotes'], audit=detail['audit'])
+                quoteHistory=detail['quotes'])
             preview = self.sync.preview(link['wb_id'])
             if preview['rows']:
                 payment = preview['rows'][0]
@@ -535,6 +595,9 @@ class ProductionPayments:
             with self.connect() as c:
                 messages = [dict(r) for r in c.execute('SELECT kind,quote_id,order_number,status,attempts,last_error,accepted_at FROM wb_prod_messages WHERE quote_id IN (SELECT id FROM wb_quotes WHERE case_id=?) ORDER BY id DESC', (link['wb_id'],))]
             result['notifications'] = messages
+            result['quote'] = self._quote_display(result['quote'], messages)
+            result['quoteHistory'] = [self._quote_display(quote, messages) for quote in detail['quotes']]
+            result['audit'] = self._audit_display(detail['audit'], messages)
             result['receipts'] = [r for r in messages if r['kind'] == 'receipt']
             result['refundNotices'] = [r for r in messages if r['kind'] == 'refund']
             result['refunds'] = self.reconciliation.refund_followups(result['quote']['id']) if result['quote'] else {'followups': []}

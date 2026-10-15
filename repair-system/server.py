@@ -62,6 +62,7 @@ SERVICE_LOCK = threading.Lock()
 PAYMENTS = None
 PAYMENT_WORKFLOW = 'payment-v1'
 PAYMENT_REQUIRED_STATUSES = frozenset(('待收件','已收件','檢測中','維修中','待寄回','已寄回','已結案'))
+DISPATCH_TEST_WARNING = '【系統驗收測試｜請勿實際派車】'
 @contextmanager
 def connect():
     c = sqlite3.connect(DB, timeout=15)
@@ -232,7 +233,10 @@ def pickup_notification_message(case):
         return ' '.join(re.sub(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]',' ',str(value or '')).split())
     values=[('送修編號',case['id']),('姓名',data.get('name','')),('電話',format_sheet_phone(data.get('phone',''))),
             ('回收地址',data.get('pickupAddress','')),('機型',data.get('model',''))]
-    return '【派車安排通知】\n有一件派車回收案件需要安排。\n\n'+'\n'.join(key+'：'+one_line(value) for key,value in values)
+    message='【派車安排通知】\n有一件派車回收案件需要安排。\n\n'+'\n'.join(key+'：'+one_line(value) for key,value in values)
+    if dispatch_test_case(case):
+        message=DISPATCH_TEST_WARNING+'\n此為付款流程測試，請勿聯絡客戶或安排物流。\n\n'+message
+    return message
 
 def enroll_new_pickup_notification(c,case_id):
     """Only called in the new case INSERT transaction; snapshots never change."""
@@ -566,6 +570,24 @@ def payment_case_allowed(case):
     if data.get('paymentWorkflow')!=PAYMENT_WORKFLOW or PAYMENTS is None: return False
     try: return PAYMENTS.is_allowed(case) is True
     except Exception: return False
+
+def dispatch_test_case(case):
+    """A display label only; never grants payment or dispatch eligibility."""
+    data=payment_case_data(case)
+    if not data or data.get('paymentWorkflow')!=PAYMENT_WORKFLOW: return False
+    model=data.get('model')
+    reserved=(isinstance(model,str) and (model=='TEST-PROD' or
+        model.startswith('TEST-PROD-') and len(model)>len('TEST-PROD-')))
+    return bool(reserved and any(isinstance(value,str) and '測試' in value
+        for value in (data.get('extra'),case.get('note'))))
+
+def dispatch_test_case_ids(case_ids):
+    with connect() as c:
+        result=[]
+        for case_id in dict.fromkeys(case_ids):
+            row=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
+            if row and dispatch_test_case(dict(row)): result.append(case_id)
+    return result
 
 def pickup_requested(case):
     """Physical pickup selection, independent of the payment workflow."""

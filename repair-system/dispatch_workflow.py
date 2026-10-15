@@ -107,6 +107,46 @@ class DispatchWorkflow:
             raise ValueError('query_unavailable')
         return sorted(set(ids)|set(re.findall(CASE,job['messages'])))
 
+    def mark_test_messages(self,messages,case_ids):
+        """Label reserved formal acceptance cases without changing any action."""
+        resolver=self.s.get('dispatch_test_case_ids')
+        test_ids=resolver(case_ids) if resolver else []
+        if not test_ids: return messages
+        warning=self.s['DISPATCH_TEST_WARNING']
+        detail='本訊息含 '+str(len(test_ids))+' 筆系統驗收案件；請勿為標示的測試案件聯絡客戶或安排物流。'
+        marked=json.loads(json.dumps(messages,ensure_ascii=False))
+        def mark_bubble(bubble,force=False):
+            if not isinstance(bubble,dict) or bubble.get('type')!='bubble': return
+            serialized=json.dumps(bubble,ensure_ascii=False)
+            present=set(re.findall(CASE,serialized))
+            own_ids=[ident for ident in test_ids if ident in present]
+            if not own_ids and not force: return
+            section=bubble.get('header') or bubble.get('body')
+            if isinstance(section,dict) and isinstance(section.get('contents'),list):
+                section['contents'].insert(0,{'type':'text','text':warning,'size':'md',
+                    'weight':'bold','wrap':True,'color':'#FFFFFF' if section is bubble.get('header') else '#9D3600'})
+                if force and not own_ids:
+                    body=bubble.get('body')
+                    if isinstance(body,dict) and isinstance(body.get('contents'),list):
+                        body['contents'].insert(0,{'type':'text','text':detail,'size':'xs','wrap':True,'color':'#9D3600'})
+            # Preserve postback data, and make the feedback text equally clear.
+            footer=bubble.get('footer',{})
+            for button in footer.get('contents',[]) if isinstance(footer,dict) else []:
+                action=button.get('action',{}) if isinstance(button,dict) else {}
+                if action.get('data') in {'pv1:dispatch:'+ident for ident in own_ids}:
+                    action['label']='測試標記已派車'
+                    if 'displayText' in action: action['displayText']='測試回報：'+action['displayText']
+        for index,message in enumerate(marked):
+            if message.get('type')=='text' and index==0:
+                message['text']=warning+'\n'+detail+'\n\n'+message['text']
+            if message.get('type')=='flex':
+                contents=message.get('contents',{})
+                if contents.get('type')=='carousel':
+                    for bubble in contents.get('contents',[]): mark_bubble(bubble)
+                else: mark_bubble(contents,force=index==0)
+                message['altText']=(warning+' '+message.get('altText',''))[:400]
+        return marked
+
     def read(self, ids):
         from cloud_support import read_pickup_dispatch
         values = self.s['cloud_settings']()
@@ -193,6 +233,7 @@ class DispatchWorkflow:
         if kind == 'menu': return self.feedback('已開啟派車工作選單')+self.menu()
         if kind == 'error': return [{'type':'text','text':'此案件不在已自動加入的派車名單中，無法查詢或回報。'}]+self.menu()
         if kind == 'dispatch':
+            job['displayCaseIds']=[args['caseId']]
             with self.s['connect']() as c: queued = c.execute('SELECT * FROM pickup_dispatch_outbox WHERE case_id=?', (args['caseId'],)).fetchone()
             if not queued: raise ValueError('query_unavailable')
             if queued['command_id'] != job['event_id']:
@@ -209,12 +250,14 @@ class DispatchWorkflow:
         # count/menu response which has no visible case reference.
         job['paymentCaseIds']=allowed
         if kind == 'case':
+            job['displayCaseIds']=[args['caseId']]
             if args['caseId'] not in allowed: return [{'type':'text','text':'此案件不在已自動加入的派車名單中。'}]+self.menu()
             row = self.read([args['caseId']])[0]
             queried=dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S')
             return self.feedback('案件資料已查詢',queried)+self.case_cards(row,queried)
         rows = self.read(allowed)
         unassigned = [row for row in rows if row['status'] == '']
+        job['displayCaseIds']=[row['caseId'] for row in unassigned]
         queried = dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S')
         if kind == 'count': return self.feedback('未派車數量已查詢',queried,'目前未派車 '+str(len(unassigned))+' 筆。')+self.menu(len(unassigned))
         if kind in ('list','refresh'):
@@ -248,7 +291,9 @@ class DispatchWorkflow:
                     c.execute("UPDATE dispatch_query_events SET state='cancelled',reply_token='' WHERE event_id=?", (row['event_id'],))
                     return {'processed':True,'state':'cancelled'}
                 job=dict(row); c.execute("UPDATE dispatch_query_events SET state='working' WHERE event_id=?", (job['event_id'],))
-            try: messages=self.messages(job)
+            try:
+                messages=self.messages(job)
+                messages=self.mark_test_messages(messages,job.get('displayCaseIds',[]))
             except Exception:
                 job['paymentCaseIds']=[]
                 messages=[{'type':'text','text':'查詢暫不可用，請稍後重新查詢。'}]+self.menu()
@@ -331,7 +376,7 @@ class DispatchWorkflow:
                 rows=self.read(self.allowlist()); waiting=[r for r in rows if r['status']=='']
                 ids=[r['caseId'] for r in waiting]; snapshot=self.snapshot(job['group_id'],ids)
                 queried=dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S'); pages=max(1,math.ceil(len(waiting)/10))
-                batches=[self.cards(waiting[p*10:p*10+10],len(waiting),snapshot,p+1,pages,queried,daily=True) for p in range(pages)]
+                batches=[self.mark_test_messages(self.cards(waiting[p*10:p*10+10],len(waiting),snapshot,p+1,pages,queried,daily=True),ids) for p in range(pages)]
                 with self.s['connect']() as c:
                     c.execute('BEGIN IMMEDIATE'); setting=c.execute('SELECT * FROM dispatch_workflow_settings WHERE singleton=1').fetchone()
                     current=c.execute('SELECT state FROM dispatch_daily_jobs WHERE job_key=?',(job['job_key'],)).fetchone()
