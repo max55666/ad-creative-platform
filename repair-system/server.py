@@ -6,6 +6,7 @@ from contextlib import contextmanager, closing
 from line_support import load_private_config, verify_id_token, validate_webhook_signature, inspect_bot, get_profile, send_push, send_reply, get_webhook_endpoint, set_webhook_endpoint, get_group_summary, send_group_text
 from cloud_support import build_payload, init_queue, validate_endpoint, validate_secret, format_sheet_phone, PRIMARY_SHEET_ID, PICKUP_SHEET_ID, PICKUP_SHEET_GID
 from dispatch_workflow import DispatchWorkflow, init_tables as init_dispatch_workflow, cancel_for_group as cancel_dispatch_workflow
+from shopline_readonly import inspect_connection
 
 ROOT = Path(__file__).parent
 CLOUD_DEPLOYMENT = os.environ.get('REPAIR_DEPLOYMENT','').strip().lower()=='cloud'
@@ -59,6 +60,335 @@ PICKUP_DISPATCH_VERIFY_NEXT = 0
 PICKUP_DISPATCH_LOCK = threading.Lock()
 SERVICE_STARTED = False
 SERVICE_LOCK = threading.Lock()
+PAYMENT_LAB_LOCK = threading.Lock()
+PAYMENT_LAB_SERVICE = None
+PAYMENT_LAB_PROVIDER_LOCK = threading.Lock()
+PAYMENT_LAB_PROVIDER_NEXT = 0.0
+SHOPLINE_PREVIEW_LOCK = threading.Lock()
+SHOPLINE_PREVIEW_SERVICE = None
+SERVICE_DESK_LOCK = threading.Lock()
+SERVICE_DESK_SERVICE = None
+# These providers are injected only by the isolated local preview launcher.
+# The browser cannot configure a LINE recipient or supply a provider credential.
+SERVICE_DESK_ORDER_PREVIEW = None
+SERVICE_DESK_LINE_TEST_SENDER = None
+SERVICE_DESK_RECONCILIATION_LOCK = threading.Lock()
+SERVICE_DESK_RECONCILIATION_SERVICE = None
+SERVICE_DESK_RECONCILIATION_ALLOWED_CASES = frozenset()
+SERVICE_DESK_PAYMENT_SHEET_LOCK = threading.Lock()
+SERVICE_DESK_PAYMENT_SHEET_SERVICE = None
+SERVICE_DESK_PAYMENT_SHEET_TARGET = None
+SERVICE_DESK_PAYMENT_SHEET_WORKER = None
+# Set only by the separate, validated cloud-test launcher; never by the formal
+# application. The cloud adapter owns its route allowlist and HTTPS boundary.
+SERVICE_DESK_CLOUD_INTERNAL = False
+SERVICE_DESK_AUTOMATION = None
+PAYMENT_LAB_MAX_BODY = 16384
+PAYMENT_LAB_HEADERS = {
+    'X-Frame-Options': 'DENY', 'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+}
+PAYMENT_LAB_FLAGS = {'enabled': True, 'simulation': True, 'internalOnly': True,
+                     'realPayment': False, 'releaseAllowed': False}
+
+
+def payment_lab_enabled():
+    return os.environ.get('REPAIR_PAYMENT_LAB') == '1'
+
+
+def service_desk_enabled():
+    return (payment_lab_enabled() and os.environ.get('REPAIR_SERVICE_DESK') == '1'
+            and DEMO and (not CLOUD_DEPLOYMENT or SERVICE_DESK_CLOUD_INTERNAL))
+
+
+def service_desk_automation_status():
+    if SERVICE_DESK_AUTOMATION is not None and service_desk_enabled():
+        return SERVICE_DESK_AUTOMATION.status()
+    return {'configured': False, 'running': False, 'quotes': [],
+            'line': {'configured': False}, 'payment': {'configured': False},
+            'internalOnly': True, 'realPayment': False, 'releaseAllowed': False}
+
+
+def service_desk_enqueue_automation(quote_id, retry=False):
+    if SERVICE_DESK_AUTOMATION is None or not service_desk_enabled():
+        return {'enqueued': False, 'enabled': False}
+    try:
+        result = (SERVICE_DESK_AUTOMATION.retry_notification(quote_id) if retry
+                  else SERVICE_DESK_AUTOMATION.quote_approved(quote_id))
+        SERVICE_DESK_AUTOMATION.wake()
+        return result
+    except Exception:
+        return {'enqueued': False, 'enabled': True,
+                'error': '核價已保存，自動通知排程需重試'}
+
+
+@contextmanager
+def service_desk_connect():
+    target = DATA_DIR / 'service-desk.db'
+    protected = (DB, DATA_DIR / 'payment-lab.db')
+    if target.is_symlink() or target.resolve().parent != DATA_DIR.resolve():
+        raise ValueError('客服內測必須使用獨立資料庫')
+    for other in protected:
+        if (target.resolve() == other.resolve()
+                or target.exists() and other.exists() and os.path.samefile(target, other)):
+            raise ValueError('客服內測必須使用獨立資料庫')
+    connection = sqlite3.connect(target, timeout=15)
+    connection.row_factory = sqlite3.Row
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def service_desk_service():
+    global SERVICE_DESK_SERVICE
+    if not service_desk_enabled():
+        raise ValueError('客服內測未啟用')
+    with SERVICE_DESK_LOCK:
+        if SERVICE_DESK_SERVICE is None:
+            from service_desk import ServiceDesk
+            service = ServiceDesk(service_desk_connect)
+            service.init()
+            SERVICE_DESK_SERVICE = service
+        return SERVICE_DESK_SERVICE
+
+
+def service_desk_line_test_status():
+    if SERVICE_DESK_LINE_TEST_SENDER is not None:
+        return SERVICE_DESK_LINE_TEST_SENDER.status()
+    return {'configured': False, 'canSend': False, 'enabled': False,
+            'recipientLabel': 'Max🚀', 'mode': 'allowlisted_test_only',
+            'simulation': False, 'internalOnly': True, 'realPayment': False,
+            'releaseAllowed': False,
+            'message': '尚未由本機啟動程序設定指定測試 LINE；模擬功能仍可使用。'}
+
+
+def service_desk_live_preview(filters=None):
+    preview = SERVICE_DESK_ORDER_PREVIEW or shopline_preview_service()
+    state = preview.state() if filters is None else preview.fetch(filters)
+    if (type(state) is not dict or state.get('simulation') is not False
+            or state.get('readOnly') is not True or state.get('realPayment') is not False
+            or state.get('releaseAllowed') is not False):
+        raise ValueError('無法確認訂單資料為唯讀預覽')
+    orders = state.get('orders', [])
+    if type(orders) is not list or len(orders) > 100:
+        raise ValueError('訂單預覽資料格式不正確')
+    compared = service_desk_service().compare_live_orders(orders)
+    metadata = {key: state.get(key) for key in (
+        'configured', 'status', 'lastFetchedAt', 'truncated', 'credentialStorage', 'source')}
+    return {**metadata, **compared, 'simulation': False, 'readOnly': True,
+            'internalOnly': True, 'realPayment': False, 'releaseAllowed': False}
+
+
+def service_desk_reconciliation_service():
+    global SERVICE_DESK_RECONCILIATION_SERVICE
+    service_desk_service()
+    with SERVICE_DESK_RECONCILIATION_LOCK:
+        if SERVICE_DESK_RECONCILIATION_SERVICE is None:
+            from service_desk_reconciliation import RealOrderReconciliation
+            service = RealOrderReconciliation(service_desk_connect)
+            service.init()
+            SERVICE_DESK_RECONCILIATION_SERVICE = service
+        return SERVICE_DESK_RECONCILIATION_SERVICE
+
+
+def service_desk_reconciliation_history(quote_id):
+    history = service_desk_reconciliation_service().history(quote_id)
+    results = []
+    for check in history.get('checks', []):
+        result = check.get('result', {})
+        results.append({**result, 'id': check.get('checkId'), **{key: check.get(key) for key in (
+            'quoteId', 'orderNumber', 'createdAt')}})
+    return {**history, 'results': results, 'simulation': False,
+            'internalOnly': True, 'realPayment': False, 'releaseAllowed': False,
+            'paymentVerified': False, 'settlementVerified': False,
+            'productionPaymentRecognized': False}
+
+
+def service_desk_reconcile(quote_id, payload):
+    if type(payload) is not dict or set(payload) != {'orderNumber', 'requestId'}:
+        raise ValueError('內測配對只接受訂單編號與本次請求識別碼')
+    number, request_id = payload['orderNumber'], payload['requestId']
+    if type(number) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', number):
+        raise ValueError('訂單編號格式不正確')
+    try:
+        valid_request = type(request_id) is str and uuid.UUID(request_id).version == 4 and str(uuid.UUID(request_id)) == request_id
+    except (ValueError, AttributeError, TypeError):
+        valid_request = False
+    if not valid_request:
+        raise ValueError('請求識別碼格式不正確')
+    wrapper = service_desk_service().get_quote(quote_id)
+    if not wrapper:
+        raise ValueError('找不到內測報價')
+    if wrapper['case']['id'] not in SERVICE_DESK_RECONCILIATION_ALLOWED_CASES:
+        raise ValueError('此案件未列入本次真實測試訂單的副本名單')
+    reconciliation = service_desk_reconciliation_service()
+    previous = reconciliation.lookup(request_id, quote_id, number)
+    if previous is not None:
+        return {**previous, 'paymentSheetSync': service_desk_enqueue_payment_sheet(wrapper['case']['id'])}
+    if SERVICE_DESK_ORDER_PREVIEW is None:
+        raise ValueError('尚未設定本機唯讀訂單橋接')
+    # The browser supplies no order evidence. Every new attempt requires an
+    # exact, authenticated provider GET through the fixed local bridge.
+    state = SERVICE_DESK_ORDER_PREVIEW.fetch({'orderNumber': number})
+    if (type(state) is not dict or state.get('status') != 'ok'
+            or state.get('configured') is not True or state.get('truncated') is not False
+            or state.get('simulation') is not False or state.get('readOnly') is not True
+            or state.get('realPayment') is not False or state.get('releaseAllowed') is not False):
+        raise ValueError('本次 SHOPLINE 唯讀查詢未完成，未採用舊資料配對；請稍後再試')
+    orders = state.get('orders')
+    if (type(orders) is not list or len(orders) != 1
+            or type(orders[0]) is not dict or orders[0].get('orderNumber') != number):
+        raise ValueError('未取得唯一且編號完全相符的維修商品訂單')
+    # record re-reads the current case and quote inside its database transaction.
+    result = reconciliation.record(orders[0], wrapper, request_id,
+        provenance={'freshProviderLookup': True, 'readOnly': True})
+    return {**result, 'paymentSheetSync': service_desk_enqueue_payment_sheet(wrapper['case']['id'])}
+
+
+def service_desk_payment_sheet_service():
+    global SERVICE_DESK_PAYMENT_SHEET_SERVICE
+    service_desk_reconciliation_service()
+    with SERVICE_DESK_PAYMENT_SHEET_LOCK:
+        if SERVICE_DESK_PAYMENT_SHEET_SERVICE is None:
+            from payment_sheet_sync import PaymentSheetSync
+            service = PaymentSheetSync(service_desk_connect)
+            service.init()
+            SERVICE_DESK_PAYMENT_SHEET_SERVICE = service
+        return SERVICE_DESK_PAYMENT_SHEET_SERVICE
+
+
+def service_desk_enqueue_payment_sheet(case_id):
+    if case_id not in SERVICE_DESK_RECONCILIATION_ALLOWED_CASES:
+        return {'queued': False, 'reason': 'not_in_test_scope'}
+    try:
+        result = service_desk_payment_sheet_service().enqueue(case_id)
+        worker = SERVICE_DESK_PAYMENT_SHEET_WORKER if service_desk_enabled() else None
+        if worker is not None:
+            worker.wake()
+        return {**result, 'automaticDeliveryEnabled': bool(worker and worker.status().get('running')),
+                'internalOnly': True}
+    except Exception:
+        # A projection failure must not hide an already saved reconciliation.
+        return {'queued': False, 'state': 'failed', 'internalOnly': True,
+                'message': '付款核對已保存，付款表同步準備需重試'}
+
+
+def service_desk_payment_sheet_state():
+    service = service_desk_payment_sheet_service()
+    state = service.preview()
+    allowed = SERVICE_DESK_RECONCILIATION_ALLOWED_CASES
+    state['rows'] = [row for row in state.get('rows', []) if row.get('caseId') in allowed]
+    state['queue'] = [{**row, 'status': 'failed' if row.get('lastError') else 'pending'}
+                      for row in service.pending().get('rows', []) if row.get('caseId') in allowed]
+    state['queueCount'] = len(state['queue'])
+    with service_desk_connect() as connection:
+        delivered = {row['case_id']: row for row in connection.execute(
+            'SELECT case_id,revision,acked_revision,synced_at FROM wb_payment_sheet_state')}
+    for row in state['rows']:
+        saved = delivered.get(row['caseId'])
+        if (saved and saved['revision'] == saved['acked_revision'] == row['syncRevision']
+                and not any(item['caseId'] == row['caseId'] for item in state['queue'])):
+            state['queue'].append({'caseId': row['caseId'], 'revision': row['syncRevision'],
+                                   'status': 'synced', 'syncedAt': saved['synced_at']})
+    target = SERVICE_DESK_PAYMENT_SHEET_TARGET or {}
+    worker = SERVICE_DESK_PAYMENT_SHEET_WORKER if service_desk_enabled() else None
+    worker_state = worker.status() if worker is not None else {'running': False, 'configured': False}
+    automatic = worker_state.get('running') is True and worker_state.get('configured') is True
+    state['sheet'] = {'configured': bool(target.get('url')), 'url': target.get('url', ''),
+                      'automaticDeliveryEnabled': automatic, 'environment': 'internal_test_copy'}
+    return {**state, 'worker': worker_state, 'internalOnly': True, 'realPayment': False, 'releaseAllowed': False}
+
+
+@contextmanager
+def payment_lab_connect():
+    """Only the isolated lab database may be opened through this factory."""
+    lab_path = DATA_DIR / 'payment-lab.db'
+    if (lab_path.resolve() == DB.resolve()
+            or lab_path.exists() and DB.exists() and os.path.samefile(lab_path, DB)):
+        raise ValueError('付款演練必須使用獨立資料庫')
+    connection = sqlite3.connect(lab_path, timeout=15)
+    connection.row_factory = sqlite3.Row
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def payment_lab_service():
+    global PAYMENT_LAB_SERVICE
+    if not payment_lab_enabled():
+        raise ValueError('付款演練未啟用')
+    with PAYMENT_LAB_LOCK:
+        if PAYMENT_LAB_SERVICE is None:
+            from payment_lab import PaymentLab
+            service = PaymentLab(payment_lab_connect)
+            service.init()
+            PAYMENT_LAB_SERVICE = service
+        return PAYMENT_LAB_SERVICE
+
+
+def payment_lab_provider_status():
+    configured = bool(os.environ.get('SHOPLINE_API_TOKEN'))
+    return {'configured': configured, 'readOnly': True,
+            'status': 'not_checked' if configured else 'not_configured'}
+
+
+def shopline_preview_cases():
+    """Read existing repair identities without creating quotes or mutations."""
+    with connect() as c:
+        rows = c.execute('SELECT id,data,status FROM cases ORDER BY created DESC LIMIT 1000').fetchall()
+    candidates = []
+    for row in rows:
+        if not re.fullmatch(r'R[0-9]{8}-[0-9]{4,}', row['id']):
+            continue
+        try:
+            data = json.loads(row['data'])
+            if type(data) is not dict:
+                continue
+        except (ValueError, TypeError):
+            continue
+        def field(name, limit):
+            value = data.get(name, '')
+            return value[:limit] if type(value) is str else ''
+        candidates.append({'quoteId': '', 'caseId': row['id'],
+                           'name': field('name', 100), 'phone': field('phone', 40),
+                           'address': field('returnAddress', 500) or field('pickupAddress', 500),
+                           'total': None, 'currency': 'TWD',
+                           'status': 'inactive' if row['status'] in ('已取消', '已結案', '不維修退回') else 'active',
+                           'paymentStatus': 'unknown'})
+    return candidates
+
+
+def shopline_preview_service():
+    global SHOPLINE_PREVIEW_SERVICE
+    if not payment_lab_enabled():
+        raise ValueError('Preview disabled')
+    with SHOPLINE_PREVIEW_LOCK:
+        if SHOPLINE_PREVIEW_SERVICE is None:
+            from shopline_orders import fetch_repair_orders
+            from shopline_preview import ShoplinePreview
+            SHOPLINE_PREVIEW_SERVICE = ShoplinePreview(
+                lambda: os.environ.get('SHOPLINE_API_TOKEN', ''),
+                shopline_preview_cases, fetch_repair_orders)
+        return SHOPLINE_PREVIEW_SERVICE
+
+
+def payment_lab_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Duplicate field')
+        result[key] = value
+    return result
+
+
+def payment_lab_json_constant(value):
+    raise ValueError('Invalid JSON constant')
+
+
 @contextmanager
 def connect():
     c = sqlite3.connect(DB, timeout=15)
@@ -120,7 +450,10 @@ def init_db():
         if 'result_action' not in [row['name'] for row in c.execute('PRAGMA table_info(pickup_dispatch_outbox)')]:
             c.execute('ALTER TABLE pickup_dispatch_outbox ADD COLUMN result_action TEXT NOT NULL DEFAULT ""')
         init_dispatch_workflow(c)
-init_db()
+if not (os.environ.get('REPAIR_SERVICE_DESK_ISOLATED_IMPORT') == '1'
+        and CLOUD_DEPLOYMENT and DEMO and payment_lab_enabled()
+        and os.environ.get('REPAIR_SERVICE_DESK') == '1'):
+    init_db()
 
 def pickup_notification_available():
     return bool(not DEMO and TOKEN and MESSAGE_SECRET and BOT_UID)
@@ -802,6 +1135,313 @@ class Handler(BaseHTTPRequestHandler):
         pairs=headers.items() if isinstance(headers,dict) else headers or ()
         for k,v in pairs: self.send_header(k,v)
         self.end_headers(); self.wfile.write(raw)
+    def payment_lab_send(self, code, data, headers=None):
+        return self.send(code, data, {**PAYMENT_LAB_HEADERS, **(headers or {})})
+    def payment_lab_admin(self):
+        user = self.user()
+        if not user:
+            self.payment_lab_send(401, {'error': '請先登入管理員'})
+            return False
+        if not user.get('admin'):
+            self.payment_lab_send(403, {'error': '需要管理員權限'})
+            return False
+        return True
+    def service_desk_allowed(self):
+        expected_host = urllib.parse.urlsplit(BASE).netloc
+        if SERVICE_DESK_CLOUD_INTERNAL and CLOUD_DEPLOYMENT:
+            return (service_desk_enabled() and BASE.startswith('https://')
+                    and self.headers.get_all('Host', []) == [expected_host])
+        return (service_desk_enabled() and self.client_address[0] in ('127.0.0.1', '::1')
+                and self.headers.get_all('Host', []) == [expected_host]
+                and not self.headers.get('Cf-Connecting-IP')
+                and not self.headers.get('X-Forwarded-For')
+                and not self.headers.get('Forwarded'))
+    def service_desk_get(self, path, query=''):
+        if not self.service_desk_allowed():
+            return self.payment_lab_send(404, {'error': '找不到頁面'})
+        try:
+            if path == '/admin/service-desk':
+                raw = (ROOT / 'service-desk.html').read_bytes()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(raw)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Referrer-Policy', 'no-referrer')
+                for key, value in PAYMENT_LAB_HEADERS.items():
+                    self.send_header(key, value)
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if not self.payment_lab_admin():
+                return
+            if path == '/api/service-desk/state':
+                parameters = urllib.parse.parse_qs(query, keep_blank_values=True)
+                if (set(parameters) - {'q', 'status'}
+                        or any(len(values) != 1 for values in parameters.values())):
+                    raise ValueError('搜尋條件格式不正確')
+                keyword = parameters.get('q', [''])[0]
+                status = parameters.get('status', [''])[0]
+                if len(keyword) > 200 or len(status) > 64:
+                    raise ValueError('搜尋條件過長')
+                return self.payment_lab_send(200, {**service_desk_service().state(keyword, status),
+                    'environment': 'cloud_internal_test' if SERVICE_DESK_CLOUD_INTERNAL else 'local_internal_test'})
+            if query:
+                raise ValueError('此操作不接受搜尋條件')
+            if path == '/api/service-desk/line-test/status':
+                return self.payment_lab_send(200, service_desk_line_test_status())
+            if path == '/api/service-desk/shopline/state':
+                return self.payment_lab_send(200, service_desk_live_preview())
+            if path == '/api/service-desk/payment-sheet/state':
+                return self.payment_lab_send(200, service_desk_payment_sheet_state())
+            if path == '/api/service-desk/automation/state':
+                return self.payment_lab_send(200, service_desk_automation_status())
+            history_route = re.fullmatch(r'/api/service-desk/quotes/([A-Za-z0-9-]{1,64})/reconciliation', path)
+            if history_route:
+                identity = history_route.group(1)
+                if service_desk_service().get_quote(identity) is None:
+                    return self.payment_lab_send(404, {'error': '找不到內測報價'})
+                return self.payment_lab_send(200, service_desk_reconciliation_history(identity))
+            matched = re.fullmatch(r'/api/service-desk/(cases|quotes)/([A-Za-z0-9-]{1,64})', path)
+            if not matched:
+                return self.payment_lab_send(404, {'error': '找不到頁面'})
+            service = service_desk_service()
+            result = (service.get_case(matched.group(2)) if matched.group(1) == 'cases'
+                      else service.get_quote(matched.group(2)))
+            if result is None:
+                return self.payment_lab_send(404, {'error': '找不到內測資料'})
+            return self.payment_lab_send(200, result)
+        except ValueError as error:
+            return self.payment_lab_send(400, {'error': str(error)[:250]})
+        except Exception:
+            return self.payment_lab_send(500, {'error': '客服內測暫時無法完成'})
+    def service_desk_post(self, path):
+        if not self.service_desk_allowed():
+            return self.payment_lab_send(404, {'error': '找不到頁面'})
+        if not self.payment_lab_admin():
+            return
+        route = re.fullmatch(
+            r'/api/service-desk/(cases|quotes|orders)/([A-Za-z0-9-]{1,64})/(quote|notify|simulate|bind|line-test|reconcile)', path)
+        allowed = {('cases', 'quote'), ('quotes', 'notify'), ('quotes', 'simulate'),
+                   ('orders', 'bind'), ('quotes', 'line-test'), ('quotes', 'reconcile')}
+        if (path not in ('/api/service-desk/cases', '/api/service-desk/shopline/fetch', '/api/service-desk/payment-sheet/prepare')
+                and (not route or (route.group(1), route.group(3)) not in allowed)):
+            return self.payment_lab_send(404, {'error': '找不到頁面'})
+        if self.headers.get_all('Origin', []) != [BASE]:
+            return self.payment_lab_send(403, {'error': '不允許的來源'})
+        content_types = self.headers.get_all('Content-Type', [])
+        if (len(content_types) != 1
+                or content_types[0].split(';', 1)[0].strip().lower() != 'application/json'):
+            return self.payment_lab_send(400, {'error': '請使用 JSON 格式'})
+        lengths = self.headers.get_all('Content-Length', [])
+        if self.headers.get('Transfer-Encoding') or len(lengths) != 1 or not re.fullmatch(r'[0-9]+', lengths[0]):
+            return self.payment_lab_send(400, {'error': '資料大小格式錯誤'})
+        try:
+            size = int(lengths[0])
+            if size > PAYMENT_LAB_MAX_BODY:
+                return self.payment_lab_send(413, {'error': '內測資料超過大小限制'})
+            if size <= 0:
+                raise ValueError('資料格式錯誤')
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                raise ValueError('資料格式錯誤')
+            data = json.loads(raw.decode('utf-8'), object_pairs_hook=payment_lab_json_object,
+                              parse_constant=payment_lab_json_constant)
+            if type(data) is not dict:
+                raise ValueError('資料格式錯誤')
+        except (ValueError, UnicodeError, RecursionError, TypeError):
+            return self.payment_lab_send(400, {'error': '資料格式錯誤'})
+        except Exception:
+            return self.payment_lab_send(500, {'error': '客服內測暫時無法完成'})
+        try:
+            if path == '/api/service-desk/shopline/fetch':
+                from shopline_preview import PreviewBusy
+                try:
+                    return self.payment_lab_send(200, service_desk_live_preview(data))
+                except PreviewBusy:
+                    return self.payment_lab_send(429, {'error': '請稍候再讀取訂單'}, {'Retry-After': '30'})
+            service = service_desk_service()
+            if path == '/api/service-desk/payment-sheet/prepare':
+                if (set(data) != {'caseId'} or type(data['caseId']) is not str
+                        or data['caseId'] not in SERVICE_DESK_RECONCILIATION_ALLOWED_CASES):
+                    raise ValueError('付款同步僅接受本次內測案件副本，不接受付款狀態或金額')
+                return self.payment_lab_send(200, service_desk_enqueue_payment_sheet(data['caseId']))
+            if path == '/api/service-desk/cases':
+                return self.payment_lab_send(201, service.create_case(data))
+            identity, action = route.group(2), route.group(3)
+            if action == 'reconcile':
+                from shopline_preview import PreviewBusy
+                try:
+                    return self.payment_lab_send(200, service_desk_reconcile(identity, data))
+                except PreviewBusy:
+                    return self.payment_lab_send(429, {'error': '請稍候再核對訂單；未使用先前資料配對'}, {'Retry-After': '30'})
+            if action == 'line-test':
+                if SERVICE_DESK_CLOUD_INTERNAL:
+                    return self.payment_lab_send(409, {'error': '雲端內測通知請使用核價後自動傳送或原通知重試，避免重複發送'})
+                if set(data) != {'requestId'}:
+                    raise ValueError('LINE 測試僅接受本次請求識別碼')
+                quote_result = service.get_quote(identity)
+                if quote_result is None:
+                    return self.payment_lab_send(404, {'error': '找不到內測報價'})
+                if SERVICE_DESK_LINE_TEST_SENDER is None:
+                    return self.payment_lab_send(503, {'error': '尚未設定指定測試 LINE；模擬功能仍可使用'})
+                result = SERVICE_DESK_LINE_TEST_SENDER.send(quote_result['quote'], data['requestId'])
+                return self.payment_lab_send(200, {
+                    'simulation': False, 'internalOnly': True, 'realPayment': False,
+                    'releaseAllowed': False, 'result': result})
+            callbacks = {'quote': service.approve_quote, 'notify': service.retry_notification,
+                         'simulate': service.simulate_order, 'bind': service.bind_order}
+            result = callbacks[action](identity, data)
+            if action == 'quote':
+                result['paymentSheetSync'] = service_desk_enqueue_payment_sheet(identity)
+            if action in ('quote', 'notify') and result.get('quote'):
+                result['automation'] = service_desk_enqueue_automation(result['quote']['id'], retry=action == 'notify')
+            return self.payment_lab_send(200, result)
+        except ValueError as error:
+            return self.payment_lab_send(400, {'error': str(error)[:250]})
+        except Exception:
+            return self.payment_lab_send(500, {'error': '客服內測暫時無法完成'})
+    def payment_lab_get(self, path):
+        if not payment_lab_enabled():
+            return self.payment_lab_send(404, {'error': '找不到頁面'})
+        try:
+            if path == '/admin/payment-lab':
+                raw = (ROOT / 'payment-lab.html').read_bytes()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(raw)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Referrer-Policy', 'no-referrer')
+                for key, value in PAYMENT_LAB_HEADERS.items():
+                    self.send_header(key, value)
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if not self.payment_lab_admin():
+                return
+            if path == '/api/payment-lab/state':
+                return self.payment_lab_send(200, {
+                    **payment_lab_service().list_quotes(),
+                    'provider': payment_lab_provider_status(),
+                    'realProduct': {
+                        'url': 'https://www.zoko.com.tw/products/petpivot-maintenance-1',
+                        'productId': '6ad05b22cda4796778761cd2', 'unitPrice': 1,
+                        'verifiedPrice': True, 'checkoutTested': False,
+                    },
+                })
+            if path == '/api/payment-lab/unmatched':
+                return self.payment_lab_send(200, payment_lab_service().list_unmatched())
+            if path == '/api/payment-lab/shopline/state':
+                return self.payment_lab_send(200, shopline_preview_service().state())
+            audit_match = re.fullmatch(r'/api/payment-lab/unmatched/([^/]+)/audit', path)
+            if audit_match:
+                result = payment_lab_service().list_binding_audit(audit_match.group(1))
+                if result is None:
+                    return self.payment_lab_send(404, {'error': '找不到演練付款'})
+                return self.payment_lab_send(200, result)
+            matched = re.fullmatch(r'/api/payment-lab/quotes/([^/]+)(/reconciliations)?', path)
+            if not matched:
+                return self.payment_lab_send(404, {'error': '找不到頁面'})
+            lab = payment_lab_service()
+            quote = lab.get_quote(matched.group(1))
+            if quote is None:
+                return self.payment_lab_send(404, {'error': '找不到演練報價'})
+            result = lab.list_reconciliations(matched.group(1)) if matched.group(2) else quote
+            return self.payment_lab_send(200, result)
+        except ValueError:
+            return self.payment_lab_send(400, {'error': '演練資料格式不正確'})
+        except Exception:
+            return self.payment_lab_send(500, {'error': '付款演練暫時無法完成'})
+    def payment_lab_post(self, path):
+        global PAYMENT_LAB_PROVIDER_NEXT
+        if not payment_lab_enabled():
+            return self.payment_lab_send(404, {'error': '找不到頁面'})
+        if not self.payment_lab_admin():
+            return
+        binding_match = re.fullmatch(r'/api/payment-lab/unmatched/([^/]+)/bind', path)
+        if path not in ('/api/payment-lab/quotes', '/api/payment-lab/simulate',
+                        '/api/payment-lab/provider/check',
+                        '/api/payment-lab/shopline/configure', '/api/payment-lab/shopline/fetch',
+                        '/api/payment-lab/unmatched/simulate') and not binding_match:
+            return self.payment_lab_send(404, {'error': '找不到頁面'})
+        if self.headers.get_all('Origin', []) != [BASE]:
+            return self.payment_lab_send(403, {'error': '不允許的來源'})
+        if self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json':
+            return self.payment_lab_send(400, {'error': '請使用 JSON 格式'})
+        lengths = self.headers.get_all('Content-Length', [])
+        if len(lengths) != 1 or not re.fullmatch(r'[0-9]+', lengths[0]):
+            return self.payment_lab_send(400, {'error': '資料大小格式錯誤'})
+        try:
+            size = int(lengths[0])
+            if size > PAYMENT_LAB_MAX_BODY:
+                return self.payment_lab_send(413, {'error': '演練資料超過大小限制'})
+            if size <= 0:
+                return self.payment_lab_send(400, {'error': '資料格式錯誤'})
+            raw = self.rfile.read(size)
+            if len(raw) != size:
+                return self.payment_lab_send(400, {'error': '資料格式錯誤'})
+            data = json.loads(raw.decode('utf-8'), object_pairs_hook=payment_lab_json_object,
+                              parse_constant=payment_lab_json_constant)
+            if type(data) is not dict:
+                return self.payment_lab_send(400, {'error': '資料格式錯誤'})
+        except (ValueError, UnicodeError, RecursionError, TypeError):
+            return self.payment_lab_send(400, {'error': '資料格式錯誤'})
+        except Exception:
+            return self.payment_lab_send(500, {'error': '付款演練暫時無法完成'})
+        try:
+            if path in ('/api/payment-lab/shopline/configure', '/api/payment-lab/shopline/fetch'):
+                from shopline_preview import PreviewBusy
+                preview = shopline_preview_service()
+                try:
+                    result = preview.configure(data) if path.endswith('/configure') else preview.fetch(data)
+                except PreviewBusy:
+                    return self.payment_lab_send(429, {'error': '請稍候再讀取訂單'}, {'Retry-After': '30'})
+                return self.payment_lab_send(200, result)
+            if path == '/api/payment-lab/provider/check':
+                if data:
+                    return self.payment_lab_send(400, {'error': '連線檢查不接受訂單資料'})
+                with PAYMENT_LAB_PROVIDER_LOCK:
+                    now = time.monotonic()
+                    if now < PAYMENT_LAB_PROVIDER_NEXT:
+                        return self.payment_lab_send(429, {'error': '請稍候再檢查連線'}, {'Retry-After': '30'})
+                    PAYMENT_LAB_PROVIDER_NEXT = now + 30
+                token = os.environ.get('SHOPLINE_API_TOKEN', '')
+                checked = inspect_connection(token)
+                allowed = {'connected', 'unauthorized', 'forbidden', 'rate_limited',
+                           'unavailable', 'invalid_response'}
+                status = checked.get('status') if isinstance(checked, dict) else None
+                if status not in allowed:
+                    status = 'invalid_response'
+                return self.payment_lab_send(200, {
+                    **PAYMENT_LAB_FLAGS,
+                    'provider': {'configured': bool(token), 'readOnly': True,
+                                 'status': status, 'connected': status == 'connected',
+                                 'requestedOrders': 0},
+                })
+            if path == '/api/payment-lab/quotes':
+                return self.payment_lab_send(201, payment_lab_service().create_quote(data))
+            if binding_match:
+                if set(data) != {'quoteId', 'reason', 'confirm'}:
+                    return self.payment_lab_send(400, {'error': '請確認演練付款綁定資料'})
+                lab = payment_lab_service()
+                if lab.list_binding_audit(binding_match.group(1)) is None:
+                    return self.payment_lab_send(404, {'error': '找不到演練付款'})
+                if lab.get_quote(data['quoteId']) is None:
+                    return self.payment_lab_send(404, {'error': '找不到演練報價'})
+                return self.payment_lab_send(200, lab.bind_payment(
+                    binding_match.group(1), data, actor='admin'))
+            if set(data) != {'quoteId', 'scenario'}:
+                return self.payment_lab_send(400, {'error': '請指定演練報價與情境'})
+            lab = payment_lab_service()
+            if lab.get_quote(data['quoteId']) is None:
+                return self.payment_lab_send(404, {'error': '找不到演練報價'})
+            if path == '/api/payment-lab/unmatched/simulate':
+                return self.payment_lab_send(200, lab.simulate_receipt(data))
+            return self.payment_lab_send(200, lab.simulate_order(
+                data['quoteId'], {'scenario': data['scenario']}))
+        except ValueError:
+            return self.payment_lab_send(400, {'error': '演練資料格式不正確'})
+        except Exception:
+            return self.payment_lab_send(500, {'error': '付款演練暫時無法完成'})
     def user(self):
         cookie = SimpleCookie(self.headers.get('Cookie',''))
         key = cookie.get('repair_session')
@@ -844,6 +1484,10 @@ class Handler(BaseHTTPRequestHandler):
         return d
     def do_GET(self):
         url=urllib.parse.urlparse(self.path); path=url.path
+        if path == '/admin/service-desk' or path.startswith('/api/service-desk'):
+            return self.service_desk_get(path, url.query)
+        if path == '/admin/payment-lab' or path.startswith('/api/payment-lab'):
+            return self.payment_lab_get(path)
         if path=='/healthz':
             try:
                 with closing(sqlite3.connect(DB.as_uri()+'?mode=rw',uri=True,timeout=2)) as c: c.execute('SELECT 1').fetchone()
@@ -984,6 +1628,13 @@ class Handler(BaseHTTPRequestHandler):
             raw=(ROOT/'line-client.js').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/javascript; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(raw); return
         self.send(404,{'error':'找不到頁面'})
     def do_POST(self):
+        lab_path = urllib.parse.urlparse(self.path).path
+        if lab_path == '/admin/service-desk' or lab_path.startswith('/api/service-desk'):
+            if urllib.parse.urlparse(self.path).query:
+                return self.payment_lab_send(400, {'error': '此操作不接受網址參數'})
+            return self.service_desk_post(lab_path)
+        if lab_path == '/admin/payment-lab' or lab_path.startswith('/api/payment-lab'):
+            return self.payment_lab_post(lab_path)
         if DEMO and self.headers.get('Cf-Connecting-IP'):
             return self.send(503,{'error':'LINE 測試服務設定中，尚未開放申請'})
         path=urllib.parse.urlparse(self.path).path

@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex,nofollow">
+  <title>PetPivot Care｜內部付款演練</title>
+  <style>
+    :root{--green:#315e50;--ink:#17352d;--muted:#6b817b;--bg:#f2f6f3;--line:#d9e4de;--amber:#926023}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:system-ui,-apple-system,'Microsoft JhengHei',sans-serif;color:var(--ink);line-height:1.7}button,input,select,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:12px;padding:12px 18px;background:var(--green);color:white;font-weight:700}button:disabled{opacity:.5;cursor:not-allowed}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #7ebaa3;outline-offset:3px}input:not([type=checkbox]),select,textarea{width:100%;margin-top:7px;padding:11px 13px;border:1px solid var(--line);border-radius:12px;background:#fafcfb;color:var(--ink)}input:disabled{background:#eaf0ec;color:var(--muted)}input[type=checkbox]{width:20px;height:20px;accent-color:var(--green);flex-shrink:0;margin:3px 0 0}h1{font-size:30px;margin:4px 0 5px;letter-spacing:1px}h2{font-size:21px;margin:0 0 8px}h3{font-size:16px;margin:0 0 8px}p{margin:8px 0}label{font-size:14px;font-weight:700}a{color:var(--green)}[hidden]{display:none!important}
+    .safety-banner{background:#f8e9c4;color:#654b1e;padding:11px 20px;text-align:center;font-size:14px;font-weight:800}.head-wrap{background:var(--green);color:white;padding:30px 24px 65px}.head{max-width:1100px;margin:auto;display:flex;gap:16px;align-items:flex-start}.logo{width:50px;height:50px;flex-shrink:0;border:1px solid #8da99f;border-radius:16px;display:grid;place-items:center;font:bold 30px Georgia}.eyebrow{font-size:11px;letter-spacing:2px;font-weight:800}.head p{color:#d7e7df;font-size:14px}.internal-pill{display:inline-block;margin-left:8px;padding:2px 9px;font-size:11px;font-weight:700;background:#ffffff1c;border:1px solid #8da99f;border-radius:20px;vertical-align:middle;letter-spacing:0}main{max-width:1140px;margin:-35px auto 55px;padding:0 20px}.card{background:white;border-radius:22px;padding:25px;margin-bottom:18px;box-shadow:0 12px 35px #244c3e08}.muted{color:var(--muted);font-size:13px}.small{font-size:12px}.intro{display:flex;justify-content:space-between;align-items:center;gap:15px}.intro strong{display:block}.connection-dot{display:inline-block;background:#17ac72;width:9px;height:9px;border-radius:50%;margin-right:8px}.outline{background:white;border:1px solid #b8cec3;color:var(--green)}.wide{width:100%}.grid{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:18px;align-items:start}.field-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:20px 0}.field{display:block}.full{grid-column:1/-1}.check{display:flex;align-items:flex-start;gap:11px;padding:14px;border:1px solid var(--line);border-radius:13px;cursor:pointer;margin-bottom:11px;font-size:14px}.check strong{display:block}.check .muted{font-weight:400}.section-label{font-size:11px;letter-spacing:2px;font-weight:800;color:var(--green);margin-bottom:7px}.notice{background:#fff6e9;color:#7a5529;border-left:3px solid #d7964f;padding:12px 15px;font-size:13px;margin:16px 0;border-radius:0 10px 10px 0}.summary{background:#f0f7f3;border:1px solid #c8ddd1;border-radius:14px;padding:16px;margin:18px 0}.summary-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;font-size:14px;margin:7px 0}.summary-row.total{border-top:1px solid #cadcd2;padding-top:11px;margin-top:12px;font-weight:800;font-size:18px}.summary-row span:last-child{white-space:nowrap}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.toolbar button{font-size:13px;padding:9px 14px}.preview{background:#f1f6f3;border:1px solid var(--line);padding:18px;border-radius:16px;margin:16px 0}.preview pre{font:inherit;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 16px}.preview .mock-button{display:block;text-align:center;padding:11px;background:#e0eae4;color:#597068;border-radius:10px;font-size:13px;font-weight:700}.empty{padding:25px 15px;text-align:center;background:#f7faf8;border:1px dashed #ccdad1;border-radius:14px;color:var(--muted);font-size:14px;margin:15px 0}.list{display:grid;gap:12px;margin:18px 0}.quote-item{display:block;width:100%;background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:14px;text-align:left;padding:15px;font-weight:400}.quote-item[aria-pressed=true]{border:2px solid var(--green);padding:14px;background:#f3f8f5}.quote-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:5px}.quote-case{font-size:15px;font-weight:800;overflow-wrap:anywhere}.quote-bottom{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px;color:var(--muted)}.badge{display:inline-block;flex-shrink:0;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:800;background:#e8eeea;color:#53685e}.badge.paid{background:#ddf3e6;color:#246447}.badge.review{background:#fff0cb;color:#896021}.badge.unpaid{background:#f7e7e1;color:#a14f38}.badge.refund{background:#e8e8f5;color:#625586}.detail-head{display:flex;justify-content:space-between;align-items:start;gap:12px}.kv{display:grid;grid-template-columns:100px minmax(0,1fr);font-size:13px;gap:7px 12px;margin:17px 0}.kv dt{color:var(--muted)}.kv dd{margin:0;overflow-wrap:anywhere}.result{padding:14px 16px;border:1px solid #cfddd4;border-radius:13px;background:#f6f9f7;margin:15px 0}.result strong{display:block}.error{padding:13px 16px;background:#fff0eb;color:#a44331;border:1px solid #efcfc5;border-radius:12px;margin-bottom:18px;font-size:14px;overflow-wrap:anywhere}.feedback{padding:11px 14px;background:#e7f4ec;color:#2c664a;border-radius:11px;font-size:13px;margin:14px 0}.login{max-width:500px;margin:0 auto}.login label{display:block;margin:20px 0}.login button{margin-top:8px}.rule-list{margin:13px 0 0;padding-left:20px;color:var(--muted);font-size:13px}.rule-list li{margin:6px 0}.footer{text-align:center;color:var(--muted);font-size:12px;margin-top:22px}.loading{text-align:center;padding:30px;color:var(--muted)}.scenario-help{min-height:44px;margin:8px 0 14px}.history{padding-left:17px;border-left:2px solid #c8dacf;margin-top:14px}.history-item{font-size:13px;margin:13px 0;overflow-wrap:anywhere}.history-item strong{display:block}.history-item p{margin:3px 0}.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    .recovery-header{margin-bottom:20px}.recovery-header h2{margin-top:4px}.recovery-grid{display:grid;grid-template-columns:minmax(0,.95fr) minmax(0,1.05fr);gap:24px;align-items:start}.recovery-panel{border:1px solid var(--line);border-radius:16px;padding:18px;min-width:0}.recovery-panel label.field{margin-top:15px}.recovery-panel .field-grid{margin:14px 0}.payment-item{display:block;width:100%;padding:14px;text-align:left;font-weight:400;background:white;color:var(--ink);border:1px solid var(--line);border-radius:13px;overflow-wrap:anywhere}.payment-item[aria-pressed=true]{border:2px solid var(--green);padding:13px;background:#f2f8f4}.payment-name{font-weight:800;font-size:14px}.payment-ref{display:block;font-size:12px;color:var(--muted);margin:4px 0;overflow-wrap:anywhere}.payment-badges{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.payment-bottom{display:flex;justify-content:space-between;gap:8px;font-size:13px}.status-stages{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:15px 0}.status-stage{border:1px solid var(--line);background:#f7faf8;border-radius:12px;padding:12px}.status-stage strong{display:block;font-size:12px;margin-bottom:7px}.status-stage .badge{white-space:normal}.candidate-list{list-style:none;padding:0;margin:12px 0 18px}.candidate-list li{background:#f4f8f5;border-radius:12px;padding:12px 13px;font-size:13px;overflow-wrap:anywhere;margin:9px 0}.candidate-list strong{display:block}.inline-error{color:#a44331;background:#fff1ec;border-radius:10px;padding:11px 13px;font-size:13px;margin:12px 0}.bind-form{padding-top:16px;border-top:1px solid var(--line);margin-top:18px}.bind-form textarea{min-height:100px;resize:vertical}.bind-form .check{font-weight:400;background:#f5f9f6;margin-top:14px}.audit-list{list-style:none;padding:0 0 0 15px;border-left:2px solid #c8dacf;margin:15px 0 0}.audit-list li{padding:0 0 16px;font-size:13px;overflow-wrap:anywhere}.audit-list strong{display:block}.audit-list p{margin:4px 0}.bound-callout{background:#e6f3eb;border:1px solid #b5d7c3;border-radius:12px;padding:14px;margin:15px 0;font-size:14px;overflow-wrap:anywhere}.bound-callout strong{display:block}.recovery-panel select{font-size:13px}.recovery-panel .kv{grid-template-columns:88px minmax(0,1fr)}.recovery-empty{padding:28px 14px}.quote-reference,#selectedId{overflow-wrap:anywhere}.recovery-legend{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted)}.recovery-legend span{border:1px solid var(--line);border-radius:10px;padding:5px 9px}.audit-head{margin-top:24px;display:flex;align-items:center;justify-content:space-between;gap:12px}.audit-head h3{margin:0}.audit-head button{padding:7px 11px;font-size:12px}
+    .shopline-review-reasons{margin:0;padding-left:18px}.shopline-review-reasons li+li{margin-top:5px}
+    #refreshUnmatchedButton,#refreshAuditButton{white-space:nowrap;flex-shrink:0}.recovery-panel>.detail-head>div{min-width:0}
+    .matching-assessment{border:1px solid #cfdbd4;border-radius:12px;background:#f5f9f6;padding:12px 14px;margin:12px 0}.matching-assessment strong{display:block;font-size:14px}.matching-assessment p{font-size:13px;margin:5px 0}.candidate-list .candidate-score{font-size:12px;font-weight:700;color:var(--green)}.candidate-list .candidate-differences{font-size:12px;color:#9b552b}.candidate-list .candidate-missing{font-size:12px;color:var(--muted)}.readonly-section{border:2px solid #8ca9b5;background:#fcfefe}.readonly-label{display:inline-block;font-size:12px;font-weight:800;color:#365f70;background:#e7f0f4;border-radius:20px;padding:4px 11px;margin-bottom:9px}.readonly-section .section-label{color:#365f70}.readonly-grid{display:grid;grid-template-columns:minmax(0,.95fr) minmax(0,1.05fr);gap:24px;align-items:start}.readonly-section .recovery-panel{background:white;border-color:#d5e1e5}.readonly-status{border:1px solid #cfdee4;border-radius:12px;background:#edf5f8;color:#365768;padding:13px 15px;font-size:14px;margin:15px 0}.readonly-status[data-state=error]{background:#fff4e9;color:#875d2e;border-color:#ead1b2}.readonly-stale{background:#fff2df;color:#855b28;border-left:3px solid #d49b52;padding:12px 14px;border-radius:0 10px 10px 0;font-size:13px;margin:14px 0}.readonly-help{font-size:13px;color:var(--muted)}.readonly-config{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:20px}.readonly-config .field{margin:13px 0}.readonly-section .toolbar{margin-top:14px}.readonly-section .toolbar button{white-space:nowrap}.shopline-item{display:block;width:100%;padding:14px;border:1px solid #d5e1e5;border-radius:13px;background:white;color:var(--ink);text-align:left;font-weight:400;overflow-wrap:anywhere}.shopline-item[aria-pressed=true]{border:2px solid #4e788a;padding:13px;background:#f0f6f8}.shopline-order-number{font-weight:800;font-size:15px;display:block}.shopline-order-meta{font-size:12px;color:var(--muted);display:block;margin:5px 0}.shopline-order-bottom{display:flex;gap:10px;justify-content:space-between;flex-wrap:wrap;font-size:13px}.readonly-section .kv{grid-template-columns:90px minmax(0,1fr)}.readonly-section dd{white-space:pre-wrap}.readonly-section textarea{min-height:85px}.readonly-section .recovery-panel>h3{margin-bottom:10px}#shoplineRefreshButton{white-space:nowrap;flex-shrink:0}
+    @media(max-width:780px){.grid,.recovery-grid,.readonly-grid{grid-template-columns:1fr}.card{padding:22px}.preview-column{order:0}.head-wrap{padding:24px 20px 60px}h1{font-size:26px}.intro{align-items:flex-start}.intro .toolbar{flex-shrink:0}}
+    @media(max-width:480px){main{padding:0 13px}.card{padding:20px 17px;border-radius:19px}.head{gap:12px}.logo{width:44px;height:44px;font-size:27px}h1{font-size:23px}.internal-pill{display:block;width:fit-content;margin:7px 0 0}.field-grid{grid-template-columns:1fr}.full{grid-column:auto}.intro{flex-direction:column}.safety-banner{font-size:12px;padding:10px 13px}.summary-row{font-size:13px}.quote-top{flex-direction:column;gap:6px}.detail-head{flex-direction:column}.kv{grid-template-columns:80px minmax(0,1fr)}.toolbar button{min-height:42px}}
+  </style>
+</head>
+<body>
+  <div class="safety-banner" role="note">內部付款演練：不會扣款、不發 LINE、不寫正式案件或派車名單</div>
+  <header class="head-wrap"><div class="head"><div class="logo" aria-hidden="true">P</div><div><div class="eyebrow">PETPIVOT CARE · INTERNAL</div><h1>維修付款演練<span class="internal-pill">管理員專用</span></h1><p>用獨立測試報價，確認付款核對與狀態處理。正式收款尚未啟用。</p></div></div></header>
+  <main>
+    <div id="error" class="error" role="alert" hidden></div>
+    <div id="feedback" class="feedback" role="status" aria-live="polite" hidden></div>
+    <div id="loading" class="card loading" role="status">正在確認管理員權限…</div>
+    <section id="loginPanel" class="card login" hidden>
+      <div class="section-label">ADMIN ACCESS</div><h2>管理員登入</h2><p class="muted">此頁只供內部演練，請使用管理員密碼。請勿輸入 LINE 密碼或任何 Access Token。</p>
+      <form id="loginForm"><label for="password">管理員密碼<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="500"></label><button id="loginButton" class="wide" type="submit">登入付款演練</button></form>
+      <div class="notice">這裡使用虛擬測試商品，不會連接 SHOPLINE 下單，也沒有實際付款連結。</div>
+    </section>
+    <section id="unavailablePanel" class="card login" hidden><div class="section-label">NOT ENABLED</div><h2>付款演練尚未開放</h2><p class="muted">目前環境未啟用內部付款演練。正式收款尚未啟用。</p><button id="retryButton" class="outline" type="button">重新確認</button></section>
+    <div id="dashboard" hidden>
+      <section class="card intro"><div><strong><span class="connection-dot" aria-hidden="true"></span>已登入管理員 · 獨立演練環境</strong><p class="muted">使用虛擬測試商品，不會連接 SHOPLINE 下單，沒有實際付款連結。</p><p class="small"><a href="https://www.zoko.com.tw/products/petpivot-maintenance-1" target="_blank" rel="noopener noreferrer">查看正式一元商品</a> · 正式商品，僅供查看；演練不下單。</p></div><div class="toolbar"><button id="refreshButton" class="outline" type="button">重新整理</button><button id="logoutButton" class="outline" type="button">登出</button></div></section>
+      <div class="grid">
+        <div>
+          <section class="card"><div class="section-label">01 · TEST QUOTE</div><h2>建立測試報價</h2><p class="muted">僅使用虛構姓名與測試案件編號，不要填寫真實客戶資料。</p>
+            <form id="quoteForm">
+              <div class="field-grid"><label class="field" for="caseId">測試案件編號<input id="caseId" value="建立時自動產生 LAB-…" disabled><span class="muted">由系統建立合成案件，不使用正式維修編號。</span></label><label class="field" for="name">測試姓名<input id="name" name="name" value="測試客戶" required maxlength="80" autocomplete="off"></label><label class="field full" for="phone">測試電話（選填）<input id="phone" name="phone" type="tel" inputmode="tel" maxlength="20" placeholder="例如 0900000000，請勿填真實電話" autocomplete="off"></label><label class="field full" for="address">測試地址（選填）<textarea id="address" name="address" maxlength="500" placeholder="填寫虛構的完整測試地址，請勿填真實客戶地址" autocomplete="off"></textarea></label><label class="field full" for="repairFee">維修費（新臺幣整數）<input id="repairFee" name="repairFee" type="number" inputmode="numeric" min="0" step="1" value="500" required><span id="warrantyHelp" class="muted" hidden>已選保固內免維修費，維修費固定為 NT$0。</span></label></div>
+              <label class="check" for="warranty"><input id="warranty" name="warranty" type="checkbox"><span><strong>保固內免維修費</strong><span class="muted">勾選後維修費為 NT$0；派車費仍另計。</span></span></label>
+              <label class="check" for="pickup"><input id="pickup" name="pickup" type="checkbox"><span><strong>需派車收件 · NT$350</strong><span class="muted">固定派車測試費用；這裡不會建立實際派車名單。</span></span></label>
+              <div class="summary" aria-live="polite"><div class="summary-row"><span>維修費</span><span id="draftRepair">NT$500</span></div><div class="summary-row"><span>派車費</span><span id="draftPickup">NT$0</span></div><div class="summary-row total"><span>本次測試合計</span><span id="draftTotal">NT$500</span></div><p class="muted small">建立後以伺服器保存的報價金額為準。</p></div>
+              <button id="createButton" class="wide" type="submit">建立測試報價</button>
+            </form>
+          </section>
+          <section class="card"><div class="section-label">02 · TEST CASES</div><div class="detail-head"><div><h2>測試報價清單</h2><p id="quoteCount" class="muted">0 筆測試報價</p></div><span class="badge">與正式案件分開保存</span></div><div id="quotesList" class="list"></div><div id="listEmpty" class="empty">還沒有測試報價。先建立一筆，再演練不同付款情況。</div></section>
+        </div>
+        <div class="preview-column">
+          <section id="selectionEmpty" class="card"><div class="section-label">03 · PAYMENT SIMULATION</div><h2>選擇一筆測試報價</h2><p class="muted">建立或選取報價後，可查看訊息預覽、執行付款情境並查看伺服器核對結果。</p><ul class="rule-list"><li>不會連接真實金流或產生可付款連結。</li><li>模擬結果由伺服器核對，頁面不自行判定是否付款。</li><li>不會寄出 LINE 訊息，也不會更新正式維修案件。</li></ul></section>
+          <div id="selectedPanel" hidden>
+            <section class="card"><div class="section-label">03 · SELECTED QUOTE</div><div class="detail-head"><div><h2 id="selectedCase"></h2><p id="selectedId" class="muted"></p></div><span id="selectedStatus" class="badge"></span></div>
+              <dl class="kv"><dt>測試姓名</dt><dd id="selectedName"></dd><dt>測試電話</dt><dd id="selectedPhone"></dd><dt>測試地址</dt><dd id="selectedAddress"></dd><dt>保固註記</dt><dd id="selectedWarranty"></dd><dt>商品</dt><dd>虛擬測試商品（未連接 SHOPLINE）</dd><dt>建立時間</dt><dd id="selectedCreated"></dd></dl>
+              <div class="summary"><div class="summary-row"><span>維修費</span><span id="selectedRepair"></span></div><div class="summary-row"><span>派車費</span><span id="selectedPickup"></span></div><div class="summary-row total"><span>測試報價合計</span><span id="selectedTotal"></span></div></div>
+              <h3>模擬付款通知預覽</h3><p class="muted">以下只在這個頁面顯示，不會發送到 LINE。</p><div class="preview"><pre id="messagePreview"></pre><div class="mock-button" aria-disabled="true">測試付款按鈕示意 · 無實際付款連結</div></div>
+              <div class="notice">正式收款尚未啟用。此頁只合成測試訂單，不會替正式一元商品下單或付款。</div>
+            </section>
+            <section class="card"><div class="section-label">04 · SIMULATE &amp; VERIFY</div><h2>演練付款情境</h2><label class="field" for="scenario">選擇測試情境<select id="scenario" name="scenario"><option value="paid">付款成功</option><option value="pending">付款處理中</option><option value="failed">付款失敗</option><option value="underpaid">付款金額不足</option><option value="amount_mismatch">付款金額不符</option><option value="invalid_currency">幣別不符</option><option value="wrong_sku">商品不符</option><option value="mixed_cart">混入其他商品</option><option value="wrong_case">案件編號不符</option><option value="cancelled">訂單已取消</option><option value="refund">訂單已退款</option><option value="duplicate">重複付款通知</option><option value="wrong_quote_version">報價版本不符</option><option value="late_old_quote">舊版報價遲到付款</option><option value="missing_evidence">缺少付款證據</option></select></label><p id="scenarioHelp" class="muted scenario-help"></p><button id="simulateButton" class="wide" type="button">執行內部演練</button><p class="muted small">伺服器會產生合成測試訂單並核對，不會觸發實際付款。</p><div id="simulationResult" class="result" role="status" aria-live="polite" hidden><strong id="resultStatus"></strong><p id="resultMessage" class="muted"></p><p id="resultTime" class="muted small"></p></div><div id="historySection" hidden><h3 style="margin-top:22px">演練紀錄</h3><div id="historyList" class="history"></div></div></section>
+          </div>
+        </div>
+      </div>
+      <section id="recoverySection" class="card" aria-labelledby="recoveryTitle">
+        <div class="recovery-header"><div class="section-label">05 · MISSING INFO RECOVERY</div><h2 id="recoveryTitle">漏填資料補救演練</h2><p class="muted">把「有沒有收到款項」與「款項屬於哪個案件」分開核對。以下訂單、配對與稽核紀錄皆為內部模擬。</p><div class="notice"><strong>漏填不用重複付款。</strong> 先確認付款訂單，再請客服核對客戶 LINE 提供的訂單與案件關係；姓名、電話或金額相符都只是候選建議。</div><div class="recovery-legend"><span>第一步：核對收款狀態</span><span>第二步：人工配對案件</span><span>演練不放行真實維修或派車</span></div></div>
+        <div class="recovery-grid">
+          <div>
+            <section class="recovery-panel"><h3>建立漏填合成訂單</h3><p class="muted">選擇一筆測試報價作為合成資料來源，這不會自動將付款認列到該報價。</p><label class="field" for="unmatchedSource">來源測試報價<select id="unmatchedSource"><option value="">請先建立並選擇測試報價</option></select></label><label class="field" for="unmatchedScenario">漏填或付款情境<select id="unmatchedScenario"><option value="missing_case">漏填維修案件編號</option><option value="missing_name">漏填姓名</option><option value="missing_both">案件編號與姓名都漏填</option><option value="different_payer">付款人姓名與申請人不同</option><option value="address_mismatch">地址不同</option><option value="missing_address">漏填地址</option><option value="phone_format">電話格式不同</option><option value="unpaid">尚未付款</option><option value="refunded">已退款</option><option value="wrong_amount">付款金額不同</option></select></label><p id="unmatchedScenarioHelp" class="muted scenario-help"></p><button id="createUnmatchedButton" class="wide" type="button">建立合成付款訂單</button><p class="muted small">只建立演練訂單；不扣款、不通知客戶、不新增正式案件。</p></section>
+            <section class="recovery-panel" style="margin-top:16px"><div class="detail-head"><div><h3>付款配對清單</h3><p id="unmatchedCount" class="muted">尚未載入</p></div><button id="refreshUnmatchedButton" class="outline" type="button">重新載入</button></div><label class="field" for="paymentSearch">搜尋付款訂單<input id="paymentSearch" type="search" placeholder="付款訂單編號、姓名或電話" autocomplete="off"></label><p id="paymentSearchCount" class="muted small"></p><div id="unmatchedError" class="inline-error" role="alert" hidden></div><div id="paymentsList" class="list"></div><div id="paymentsEmpty" class="empty">還沒有合成付款訂單。可從上方建立漏填情境。</div></section>
+          </div>
+          <section class="recovery-panel" aria-labelledby="paymentDetailTitle">
+            <div id="paymentSelectionEmpty" class="empty recovery-empty"><h3 id="paymentDetailTitle">選擇一筆付款訂單</h3><p>查看付款狀態與原始備註，再由客服人工核對案件。</p></div>
+            <div id="paymentDetail" hidden><h3>合成付款訂單詳情</h3><p id="paymentOrderId" class="muted small" style="overflow-wrap:anywhere"></p><div class="status-stages"><div class="status-stage"><strong>① 收款核對</strong><span id="paymentFundsStatus" class="badge"></span></div><div class="status-stage"><strong>② 案件配對</strong><span id="paymentMatchStatus" class="badge"></span></div></div><dl class="kv"><dt>付款姓名</dt><dd id="paymentPayerName"></dd><dt>付款電話</dt><dd id="paymentPayerPhone"></dd><dt>付款地址</dt><dd id="paymentPayerAddress"></dd><dt>訂單金額</dt><dd id="paymentTotal"></dd><dt>幣別</dt><dd id="paymentCurrency"></dd><dt>原備註編號</dt><dd id="paymentRemarkCase"></dd><dt>原備註姓名</dt><dd id="paymentRemarkName"></dd><dt>建立時間</dt><dd id="paymentCreated"></dd></dl>
+              <div id="paymentBound" class="bound-callout" hidden><strong>已完成案件配對（僅演練）</strong><span id="paymentBoundCase"></span><p class="small">此筆付款已綁定，不能再綁定到其他案件。未放行任何真實維修或派車。</p></div>
+              <div id="candidateSuggestions"><h3>相符候選建議</h3><p class="muted">只提供核對線索，不自動認列付款；客服仍需確認客戶 LINE 提供的訂單與案件關係。</p><div class="matching-assessment"><strong id="paymentMatchingLevel"></strong><p id="paymentMatchingReason"></p><p id="paymentMatchingUnique" class="muted"></p><p class="muted small">永不自動綁定或放行真實案件。</p></div><ul id="matchingCandidates" class="candidate-list"></ul><p id="candidatesEmpty" class="muted">目前沒有候選建議。可在下方人工選擇符合金額與有效狀態的測試報價。</p></div>
+              <form id="bindForm" class="bind-form"><h3>客服人工確認綁定</h3><label class="field" for="bindTarget">要配對的測試報價<select id="bindTarget"><option value="">請由客服選擇目標測試報價</option></select></label><p id="bindingHelp" class="muted"></p><label class="field" for="bindReason">核對理由（8–500 字）<textarea id="bindReason" minlength="8" maxlength="500" placeholder="例如：已核對客戶 LINE 提供的付款訂單，訂單金額與案件相符。" required></textarea></label><label class="check" for="bindConfirm"><input id="bindConfirm" type="checkbox" required><span>我已核對客戶 LINE 提供的付款訂單與案件關係。</span></label><button id="bindButton" class="wide" type="submit">確認綁定這筆測試付款</button><p class="muted small">未付款、已退款、金額不符或失效報價不能綁定。一筆付款只允許成功綁定一次。</p></form>
+              <div class="audit-head"><h3>唯讀配對稽核紀錄</h3><button id="refreshAuditButton" class="outline" type="button">重新載入紀錄</button></div><p class="muted small">保留配對過程與核對理由，不能在此修改或刪除。</p><div id="auditError" class="inline-error" role="alert" hidden></div><ol id="auditList" class="audit-list"></ol><p id="auditEmpty" class="muted">尚無稽核紀錄。</p>
+            </div>
+          </section>
+        </div>
+      </section>
+      <section id="shoplineSection" class="card readonly-section" aria-labelledby="shoplineTitle">
+        <span class="readonly-label">獨立真實資料預覽 · 僅限管理員</span><div class="section-label">06 · SHOPLINE READ-ONLY PREVIEW</div><h2 id="shoplineTitle">SHOPLINE 真實訂單唯讀預覽</h2><p class="readonly-help">僅讀取本維修一元商品的訂單。付款狀態為 SHOPLINE 回報，尚未核實金流；這裡不會修改維修案件或派車，也不會將真實訂單帶入上方合成付款的綁定功能。</p>
+        <div id="shoplineStatus" class="readonly-status" role="status" aria-live="polite"><strong id="shoplineStatusTitle">正在讀取唯讀預覽設定…</strong><p id="shoplineStatusMessage"></p></div><p id="shoplineLastFetched" class="muted">最近成功讀取時間：尚無</p><p id="shoplineCaseScope" class="readonly-help">案件比對範圍尚未載入。</p><div id="shoplineStale" class="readonly-stale" hidden></div><div id="shoplineTruncated" class="notice" hidden>本次結果已達讀取上限。請縮短日期範圍，或用付款訂單編號查詢。</div>
+        <div class="readonly-grid">
+          <div>
+            <section class="recovery-panel"><form id="shoplineTokenForm" class="readonly-config"><h3>本次測試的唯讀憑證</h3><p id="shoplineConfigured" class="muted">尚未確認設定狀態。</p><label class="field" for="shoplineToken">SHOPLINE Access Token<input id="shoplineToken" name="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="8192" placeholder="請自行貼上本次測試用 Token" required></label><p class="muted small">只暫存在伺服器記憶體，送出後立即清空此輸入欄，不存瀏覽器、不顯示於預覽。重啟後清除本次 Token；若環境已有設定則沿用。儲存憑證本身不會查詢訂單。</p><button id="shoplineConfigureButton" class="outline wide" type="submit">暫存本次唯讀 Token</button></form>
+              <form id="shoplineFetchForm"><h3>主動讀取真實訂單</h3><label class="field" for="shoplineQueryMode">查詢方式<select id="shoplineQueryMode"><option value="days">依最近天數</option><option value="order">依付款訂單編號</option></select></label><label id="shoplineDaysField" class="field" for="shoplineDays">日期範圍<select id="shoplineDays"><option value="7">最近 7 天</option><option value="14">最近 14 天</option><option value="30">最近 30 天</option></select></label><label id="shoplineOrderField" class="field" for="shoplineOrderNumber" hidden>付款訂單編號<input id="shoplineOrderNumber" maxlength="100" autocomplete="off" placeholder="輸入客戶提供的 SHOPLINE 訂單編號"></label><div class="toolbar"><button id="shoplineFetchButton" type="submit">讀取訂單（唯讀）</button><button id="shoplineRefreshButton" class="outline" type="button">重看已讀取資料</button></div><p class="muted small">只有按「讀取訂單」才會向 SHOPLINE 查詢。重新整理預覽只顯示伺服器目前保存的結果。</p></form>
+            </section>
+            <section class="recovery-panel" style="margin-top:16px"><h3>真實訂單預覽清單</h3><p id="shoplineOrderCount" class="muted">尚無預覽訂單。</p><div id="shoplineOrdersList" class="list"></div><div id="shoplineOrdersEmpty" class="empty">尚未讀取真實訂單。設定憑證後，請主動按「讀取訂單」。</div></section>
+          </div>
+          <section class="recovery-panel"><div id="shoplineSelectionEmpty" class="empty"><h3>選擇一筆真實訂單</h3><p>查看 SHOPLINE 回報資料與候選提示，這裡沒有收款認列或案件綁定按鈕。</p></div><div id="shoplineOrderDetail" hidden><h3 id="shoplineDetailNumber">真實訂單詳情</h3><span class="badge review">付款狀態僅供參考 · 尚未核實金流</span><dl class="kv"><dt>訂購人</dt><dd id="shoplineCustomerName"></dd><dt>訂購電話</dt><dd id="shoplineCustomerPhone"></dd><dt>收件人</dt><dd id="shoplineRecipientName"></dd><dt>收件電話</dt><dd id="shoplineRecipientPhone"></dd><dt>收件地址</dt><dd id="shoplineAddress"></dd><dt>原始備註</dt><dd id="shoplineRemarks"></dd><dt>訂單金額</dt><dd id="shoplineTotal"></dd><dt>幣別</dt><dd id="shoplineCurrency"></dd><dt>商品與金額核對</dt><dd id="shoplineProductValid"></dd><dt>待核對原因</dt><dd><ul id="shoplineReviewReasons" class="shopline-review-reasons"></ul></dd><dt>回報付款狀態</dt><dd id="shoplineReportedStatus"></dd><dt>金流核實</dt><dd>尚未核實（未認列已付款）</dd><dt>建立時間</dt><dd id="shoplineCreated"></dd><dt>讀取時間</dt><dd id="shoplineFetched"></dd></dl><h3>案件候選提示（唯讀）</h3><div class="matching-assessment"><strong id="shoplineMatchingLevel"></strong><p id="shoplineMatchingReason"></p><p id="shoplineMatchingUnique" class="muted"></p><p class="muted small">即使高度相符，也不會自動認列付款、綁定或放行。</p></div><ul id="shoplineCandidates" class="candidate-list"></ul><p id="shoplineCandidatesEmpty" class="muted">目前沒有候選提示，需由客服另外核對。</p><div class="notice">這是真實訂單的唯讀預覽，與上方合成測試訂單分開。尚未核實付款，也不改動任何正式維修或派車資料。</div></div></section>
+        </div>
+      </section>
+    </div>
+    <p class="footer">PetPivot Care · 內部付款演練與唯讀預覽 · 不對外收款</p>
+  </main>
+  <template id="quoteTemplate"><button class="quote-item" type="button" aria-pressed="false"><span class="quote-top"><span class="quote-case"></span><span class="badge"></span></span><span class="quote-bottom"><span class="quote-name"></span><span class="quote-amount"></span></span><span class="quote-reference muted small"></span></button></template>
+  <template id="historyTemplate"><div class="history-item"><strong></strong><p></p><span class="muted small"></span></div></template>
+  <template id="paymentTemplate"><button class="payment-item" type="button" aria-pressed="false"><span class="payment-name"></span><span class="payment-ref"></span><span class="payment-badges"><span class="badge funds-badge"></span><span class="badge match-badge"></span></span><span class="payment-bottom"><span class="payment-phone"></span><span class="payment-amount"></span></span></button></template>
+  <template id="candidateTemplate"><li><strong></strong><p class="candidate-score"></p><p class="candidate-contact"></p><p class="candidate-address"></p><p class="candidate-reasons muted"></p><p class="candidate-differences"></p><p class="candidate-missing"></p></li></template>
+  <template id="auditTemplate"><li><strong></strong><p class="audit-reason"></p><p class="audit-target muted"></p><span class="muted small"></span></li></template>
+  <template id="shoplineOrderTemplate"><button class="shopline-item" type="button" aria-pressed="false"><span class="shopline-order-number"></span><span class="shopline-order-meta"></span><span class="shopline-order-bottom"><span class="shopline-order-customer"></span><span class="shopline-order-total"></span></span><span class="badge review" style="margin-top:9px">尚未核實金流 · 唯讀</span></button></template>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    const money = value => typeof value === 'number' && Number.isFinite(value) ? 'NT$' + value.toLocaleString('zh-TW', {maximumFractionDigits:0}) : '待取得';
+    const text = (id, value) => { $(id).textContent = value === undefined || value === null ? '—' : String(value); };
+    const show = (id, yes) => { $(id).hidden = !yes; };
+    let quotes = [], selectedId = null, busy = false, savedRepairFee = '500';
+    let payments = [], selectedPaymentId = null, auditEvents = [], auditForId = null, unmatchedFailed = false;
+    let shoplineOrders = [], selectedShoplineOrderId = null, shoplineConfigured = false, shoplineStatus = 'not_configured', shoplineLastFetchedAt = null, shoplineTruncated = false, shoplineCaseCount = null, shoplineAmountsAvailable = null;
+    const shoplineMessages = {
+      not_configured:['尚未設定唯讀憑證','請在此輸入本次測試 Token，或由伺服器環境設定提供。'],
+      not_checked:['已設定憑證，尚未查詢','請選擇日期範圍或付款訂單編號，再按「讀取訂單」。'],
+      unauthorized:['SHOPLINE 未接受本次憑證','請確認或更新 Token，再主動重試讀取。'],
+      forbidden:['目前沒有讀取訂單的權限','請確認此 Token 的訂單讀取權限後重試。'],
+      rate_limited:['SHOPLINE 暫時限制查詢頻率','請稍後再按「讀取訂單」，系統不會自動重複查詢。'],
+      unavailable:['暫時無法讀取 SHOPLINE','請稍後再試；下方如有資料，仍是上次成功讀取的預覽。'],
+      invalid_response:['訂單回應無法辨識','這次未取得可確認的資料，請稍後重試。'],
+      ok:['已完成訂單唯讀讀取','付款狀態仍是 SHOPLINE 回報，尚未核實金流，也未認列或放行任何案件。']
+    };
+    const unmatchedScenarios = {
+      missing_case:'合成已付款訂單，備註漏填維修案件編號。',
+      missing_name:'合成已付款訂單，備註漏填姓名。',
+      missing_both:'合成已付款訂單，案件編號與姓名皆未填寫。',
+      different_payer:'合成已付款訂單，但付款人與維修申請人姓名不同，需客服核對。',
+      address_mismatch:'合成付款地址與維修申請地址不同的訂單，查看候選的地址差異提示。',
+      missing_address:'合成未填寫付款地址的訂單；缺少地址不會被當作地址相符。',
+      phone_format:'合成電話帶有格式差異的訂單，查看正規化後的電話核對提示。',
+      unpaid:'合成尚未付款的訂單，不能將它綁定為已付款案件。',
+      refunded:'合成已退款訂單，不能再綁定為已付款案件。',
+      wrong_amount:'合成付款金額與來源報價不同的訂單，客服不可直接認列。'
+    };
+    const scenarios = {
+      paid:'演練正確商品、幣別與金額的付款成功通知。',
+      pending:'演練訂單存在，但付款仍在處理中的通知。',
+      failed:'演練金流回報付款失敗的情況。',
+      underpaid:'演練實付金額少於這筆測試報價的情況。',
+      amount_mismatch:'演練實付金額與這筆測試報價不一致的情況。',
+      invalid_currency:'演練付款幣別與測試報價不一致的情況。',
+      wrong_sku:'演練付款訂單中的商品與虛擬測試商品不符。',
+      mixed_cart:'演練訂單混入其他商品，無法直接認列為維修付款。',
+      wrong_case:'演練付款訂單的案件編號與這筆測試報價不符。',
+      cancelled:'演練測試訂單已取消的通知。',
+      refund:'演練已驗證測試付款的退款通知；若沒有先前付款，伺服器會阻擋。',
+      duplicate:'演練同一筆付款通知重複抵達，檢查是否避免重複入帳。',
+      wrong_quote_version:'演練付款訂單引用了不同的測試報價版本。',
+      late_old_quote:'演練舊版報價的付款通知遲到，檢查是否阻擋。',
+      missing_evidence:'演練缺少可核對的付款證據。'
+    };
+    function identifier(q){ return q && (q.id || q.quoteId); }
+    function first(obj, keys){ for(const key of keys) if(obj && obj[key] !== undefined && obj[key] !== null) return obj[key]; return undefined; }
+    function fee(q, field){
+      const keys = {repair:['repairFee','repairAmount'],pickup:['pickupFee','pickupAmount'],total:['total','totalAmount','amount']};
+      const value = first(q, keys[field]);
+      return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+    }
+    function addressText(value){if(typeof value==='string')return value.trim();if(!value||typeof value!=='object')return '';const fields=typeof value.countryCode==='string'&&value.countryCode.trim().toUpperCase()==='TW'?['countryCode','postcode','city','district','address2','address1']:['countryCode','postcode','city','district','address1','address2'];return fields.map(key=>typeof value[key]==='string'?value[key].trim():'').filter(Boolean).join(' ');}
+    function matchingLabel(level){return level==='high'?'高度相符建議':level==='low'?'相符線索不足，需人工核對':'需人工核對';}
+    function stringList(value){return Array.isArray(value)?value.filter(item=>typeof item==='string'&&item).join('、'):'';}
+    function renderMatching(prefix,assessment){const data=assessment&&typeof assessment==='object'?assessment:{};text(prefix+'MatchingLevel',matchingLabel(data.level)+'（不自動放行）');text(prefix+'MatchingReason',typeof data.reason==='string'?data.reason:'候選線索只供客服人工核對。');text(prefix+'MatchingUnique',data.unique===true?'目前候選唯一，仍須人工確認訂單與案件關係。':'尚未確認唯一候選，請核對姓名、電話、地址與案件關係。');}
+    function renderCandidates(containerId,candidates){const list=$(containerId);list.replaceChildren();for(const candidate of candidates){const node=$('candidateTemplate').content.firstElementChild.cloneNode(true);node.querySelector('strong').textContent=(candidate.caseId||'測試案件')+' · '+(candidate.name||'未填姓名');node.querySelector('.candidate-score').textContent=matchingLabel(candidate.level)+(Number.isInteger(candidate.score)?' · 評分 '+candidate.score+'/100':'');node.querySelector('.candidate-contact').textContent='電話 '+(candidate.phone||'未填')+' · '+money(candidate.total);node.querySelector('.candidate-address').textContent='地址：'+(addressText(candidate.address)||'未填寫');node.querySelector('.candidate-reasons').textContent='相符線索：'+(stringList(candidate.reasons)||'尚無')+'；只供建議。';const mismatches=stringList(candidate.mismatches),missing=stringList(candidate.missing);node.querySelector('.candidate-differences').textContent='差異：'+(mismatches||'目前未列出差異');node.querySelector('.candidate-missing').textContent='缺少資料：'+(missing||'目前未列出缺項');list.append(node);}}
+    function statusOf(q){
+      const raw = first(q, ['paymentState','paymentStatus','status','state']);
+      const value = typeof raw === 'string' ? raw : '';
+      const key = value.toLowerCase();
+      const labels = {
+        simulation_verified:['已演練：已付款','paid'],simulation_no_payment_required:['已演練：免付款','paid'],simulation_pending:['已演練：待核對','review'],simulation_review:['已演練：待核對','review'],simulation_failed:['已演練：未付款','unpaid'],simulation_cancelled:['已演練：未付款','unpaid'],simulation_refunded:['已演練：退款','refund'],
+        paid:['已演練：已付款','paid'],payment_received:['已演練：已付款','paid'],verified:['已演練：已付款','paid'],
+        review:['已演練：待核對','review'],needs_review:['已演練：待核對','review'],manual_review:['已演練：待核對','review'],pending_review:['已演練：待核對','review'],pending:['已演練：待核對','review'],
+        unpaid:['已演練：未付款','unpaid'],unpaid_test:['已演練：未付款','unpaid'],failed:['已演練：未付款','unpaid'],cancelled:['已演練：未付款','unpaid'],draft:['尚未演練付款',''],created:['尚未演練付款',''],
+        refunded:['已演練：退款','refund'],refund:['已演練：退款','refund'],
+        '已付款':['已演練：已付款','paid'],'待核對':['已演練：待核對','review'],'未付款':['已演練：未付款','unpaid'],'已退款':['已演練：退款','refund'],'退款':['已演練：退款','refund']
+      };
+      return labels[key] || [value ? '伺服器狀態：' + value : '尚未取得付款狀態',''];
+    }
+    function applyStatus(node,q){ const [label,kind]=statusOf(q); node.textContent=label; node.className='badge'+(kind?' '+kind:''); }
+    function dateText(value){ if(!value)return '—'; const d=new Date(value); return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false}); }
+    function clearMessages(){ show('error',false); show('feedback',false); }
+    function notify(message){ text('feedback',message); show('feedback',true); }
+    function showError(message){ text('error',message); show('error',true); }
+    function loginView(){ show('loginPanel',true); show('dashboard',false); show('loading',false); show('unavailablePanel',false); quotes=[]; selectedId=null;payments=[];selectedPaymentId=null;auditEvents=[];auditForId=null;shoplineOrders=[];selectedShoplineOrderId=null;shoplineConfigured=false;shoplineCaseCount=null;shoplineAmountsAvailable=null;$('shoplineToken').value=''; }
+    async function api(path, body){
+      const response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',redirect:'error',headers:body===undefined?{'Accept':'application/json'}:{'Accept':'application/json','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+      let data={}; try{data=await response.json();}catch{ if(response.ok)throw new Error('伺服器未回傳可讀取的演練資料。'); }
+      if(response.status===401){loginView();const error=new Error('請先登入管理員，或重新登入後再試一次。');error.code='unauthorized';throw error;}
+      if(response.status===404&&path==='/api/payment-lab/state'){show('unavailablePanel',true);show('loginPanel',false);show('dashboard',false);show('loading',false);throw new Error('此環境尚未啟用內部付款演練。');}
+      if(!response.ok)throw new Error(typeof data.error==='string'?data.error:typeof data.message==='string'?data.message:'操作未完成，請稍後再試。');
+      return data;
+    }
+    function setBusy(value){busy=value;for(const id of ['loginButton','createButton','refreshButton','simulateButton','logoutButton','retryButton','refreshUnmatchedButton'])$(id).disabled=value;for(const node of document.querySelectorAll('.quote-item,.payment-item,.shopline-item'))node.disabled=value||node.dataset.available!=='true';$('scenario').disabled=value;updateRecoveryControls();updateShoplineControls();}
+    async function run(fn){ if(busy)return; clearMessages();setBusy(true);try{await fn();}catch(error){showError(error.message||'無法連線，請稍後再試。');}finally{setBusy(false);} }
+    async function loadState(){
+      const state=await api('/api/payment-lab/state');
+      if(state.enabled!==true||state.simulation!==true||state.realPayment!==false||state.releaseAllowed!==false){show('unavailablePanel',true);show('loginPanel',false);show('dashboard',false);show('loading',false);return;}
+      quotes=Array.isArray(state.quotes)?state.quotes:[];
+      show('loading',false);show('loginPanel',false);show('unavailablePanel',false);show('dashboard',true);
+      if(selectedId&&!quotes.some(q=>identifier(q)===selectedId))selectedId=null;
+      renderQuotes();renderSelected();await loadUnmatched();await loadShoplineState();
+    }
+    function renderQuotes(){
+      const list=$('quotesList');list.replaceChildren();text('quoteCount',quotes.length+' 筆測試報價');show('listEmpty',quotes.length===0);
+      for(const q of quotes){
+        const node=$('quoteTemplate').content.firstElementChild.cloneNode(true), id=identifier(q);
+        node.querySelector('.quote-case').textContent=q.caseId||'未提供測試案件編號';
+        node.querySelector('.quote-name').textContent=q.name||'測試客戶';
+        node.querySelector('.quote-amount').textContent=money(fee(q,'total'));
+        node.querySelector('.quote-reference').textContent='報價 '+(id||'—')+(q.version?' · 第 '+q.version+' 版':'');
+        applyStatus(node.querySelector('.badge'),q);node.setAttribute('aria-pressed',String(id===selectedId));node.dataset.available=String(!!id);node.disabled=!id||busy;
+        node.addEventListener('click',()=>{selectedId=id;clearMessages();renderQuotes();renderSelected();if(window.innerWidth<=780)$('selectedPanel').scrollIntoView({behavior:'smooth',block:'start'});});list.append(node);
+      }
+    }
+    function renderSelected(){
+      const q=quotes.find(item=>identifier(item)===selectedId);show('selectedPanel',!!q);show('selectionEmpty',!q);if(!q)return;
+      text('selectedCase',q.caseId||'測試報價');text('selectedId','報價 '+identifier(q)+(q.version?' · 第 '+q.version+' 版':''));text('selectedName',q.name||'測試客戶');text('selectedPhone',q.phone||'未填寫');text('selectedAddress',addressText(q.address)||'未填寫');text('selectedWarranty',q.warranty?'保固內免維修費':'一般維修報價');text('selectedCreated',dateText(first(q,['createdAt','created'])));applyStatus($('selectedStatus'),q);
+      text('selectedRepair',money(fee(q,'repair')));text('selectedPickup',money(fee(q,'pickup')));text('selectedTotal',money(fee(q,'total')));
+      text('messagePreview',['【內部測試｜維修付款通知預覽】','測試案件：'+(q.caseId||'—'),'測試姓名：'+(q.name||'測試客戶'),'測試報價：'+identifier(q),'維修費：'+money(fee(q,'repair')),'派車費：'+money(fee(q,'pickup')),'合計：'+money(fee(q,'total')),'','此訊息僅供內部預覽，不會發送。','虛擬測試商品，尚未連接 SHOPLINE，沒有實際付款連結。'].join('\n'));
+      const message=first(q,['verificationMessage','reason','message','lastMessage']), hasResult=!!first(q,['lastScenario','lastSimulation','verificationMessage','lastResult','lastEvent']);
+      show('simulationResult',hasResult);text('resultStatus',statusOf(q)[0]);text('resultMessage',message||'請依伺服器回傳狀態檢視這次演練。');text('resultTime',q.updatedAt?'更新時間：'+dateText(q.updatedAt):'');
+      renderHistory(q);
+    }
+    function renderHistory(q){
+      const source=first(q,['history','events','simulations']), entries=Array.isArray(source)?source:[];show('historySection',entries.length>0);$('historyList').replaceChildren();
+      for(const entry of entries.slice().reverse().slice(0,15)){
+        const node=$('historyTemplate').content.firstElementChild.cloneNode(true);
+        const scenario=first(entry,['scenario','type']), state=first(entry,['paymentState','paymentStatus','status','state']);
+        node.querySelector('strong').textContent=state?statusOf(entry)[0]:'演練紀錄';
+        node.querySelector('p').textContent=first(entry,['verificationMessage','reason','message'])||(scenario?(scenarios[scenario]||String(scenario)):'伺服器已記錄測試事件。');
+        node.querySelector('span').textContent=dateText(first(entry,['createdAt','time','at','timestamp']));$('historyList').append(node);
+      }
+    }
+    function draftSummary(){
+      const repair=Number($('repairFee').value),valid=Number.isSafeInteger(repair)&&repair>=0,pickup=$('pickup').checked?350:0;
+      text('draftRepair',valid?money(repair):'請輸入非負整數');text('draftPickup',money(pickup));text('draftTotal',valid&&Number.isSafeInteger(repair+pickup)?money(repair+pickup):'請確認維修費');
+    }
+    function selectedPayment(){return payments.find(p=>p.id===selectedPaymentId);}
+    function requireSimulation(data){if(data.simulation!==true||data.realPayment!==false||data.releaseAllowed!==false)throw new Error('無法確認資料屬於內部演練，操作已停止。');}
+    function fundsLabel(p){
+      const values={simulation_verified:['已確認收款（演練）','paid'],simulation_pending:['尚未確認收款','review'],pending:['尚未確認收款','review'],simulation_refunded:['已退款（演練）','refund'],refunded:['已退款（演練）','refund']};
+      return values[p.paymentStatus]||['付款狀態待核對','review'];
+    }
+    function matchLabel(p){return p.matchStatus==='bound'?['已人工配對（演練）','paid']:['尚未配對案件','review'];}
+    function badge(node,values){node.textContent=values[0];node.className='badge'+(values[1]?' '+values[1]:'');}
+    function quoteBlockReason(q,p){
+      if(q.status!=='active')return '報價已失效';
+      if(fee(q,'total')===undefined||fee(q,'total')<=0)return '此報價無須付款';
+      if(['simulation_verified','simulation_refunded'].includes(q.paymentStatus))return '已有收款或退款紀錄';
+      if(!p)return '請先選擇付款訂單';
+      if(p.remarkCaseId&&p.remarkCaseId!==q.caseId)return '原備註已指向其他案件';
+      if((q.currency||'TWD')!==p.currency)return '幣別不同';
+      if(fee(q,'total')!==p.total)return '金額不同';
+      return '';
+    }
+    function populateSourceQuotes(){
+      const select=$('unmatchedSource'),previous=select.value;select.replaceChildren();
+      const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent=quotes.length?'請選擇來源測試報價':'請先建立測試報價';select.append(placeholder);
+      for(const q of quotes){const option=document.createElement('option');option.value=identifier(q)||'';const unavailable=q.status!=='active'||!(fee(q,'total')>0);option.disabled=unavailable;option.textContent=(q.caseId||'測試報價')+' · '+(q.name||'測試客戶')+' · '+money(fee(q,'total'))+(unavailable?'（失效或免付款，無法使用）':'');select.append(option);}
+      const available=Array.from(select.options).find(option=>option.value===previous&&!option.disabled);select.value=available?previous:'';
+    }
+    function populateTargetQuotes(p){
+      const select=$('bindTarget'),previous=select.value;select.replaceChildren();
+      const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='請由客服選擇目標測試報價';select.append(placeholder);
+      for(const q of quotes){const option=document.createElement('option'),reason=quoteBlockReason(q,p);option.value=identifier(q)||'';option.disabled=!!reason||!option.value;option.textContent=(q.caseId||'測試報價')+' · '+(q.name||'測試客戶')+' · '+money(fee(q,'total'))+(reason?'（'+reason+'）':'');select.append(option);}
+      const available=Array.from(select.options).find(option=>option.value===previous&&!option.disabled);select.value=available?previous:'';
+    }
+    function updateRecoveryControls(){
+      const p=selectedPayment(),source=quotes.find(q=>identifier(q)===$('unmatchedSource').value);
+      $('unmatchedSource').disabled=busy;$('unmatchedScenario').disabled=busy;
+      $('createUnmatchedButton').disabled=busy||!source||source.status!=='active'||!(fee(source,'total')>0);
+      $('refreshAuditButton').disabled=busy||!p;
+      const eligible=!!p&&p.matchStatus==='unmatched'&&p.paymentStatus==='simulation_verified'&&!unmatchedFailed;
+      for(const id of ['bindTarget','bindReason','bindConfirm'])$(id).disabled=busy||!eligible;
+      const target=quotes.find(q=>identifier(q)===$('bindTarget').value),reason=$('bindReason').value.trim();
+      $('bindButton').disabled=busy||!eligible||!target||!!quoteBlockReason(target,p)||Array.from(reason).length<8||Array.from(reason).length>500||!$('bindConfirm').checked;
+      let help='請選擇有效且金額、幣別相同的報價，再填寫核對理由並確認。';
+      if(unmatchedFailed)help='付款清單載入失敗，請先按「重新載入」取得最新資料再綁定。';
+      else if(p&&p.matchStatus==='bound')help='此筆付款已配對，不能重複綁定。';
+      else if(p&&p.paymentStatus!=='simulation_verified')help=p.paymentStatus==='simulation_refunded'?'此筆付款已退款，不能綁定。':'尚未確認收款，不能綁定為已付款案件。';
+      else if(target&&!quoteBlockReason(target,p))help='目標：'+target.caseId+'／'+target.name+'／電話 '+(target.phone||'未填')+'／'+money(fee(target,'total'))+'。仍須核對客戶 LINE 提供的付款訂單。';
+      text('bindingHelp',help);
+    }
+    async function loadUnmatched(){
+      populateSourceQuotes();
+      try{const data=await api('/api/payment-lab/unmatched');requireSimulation(data);payments=Array.isArray(data.payments)?data.payments:[];unmatchedFailed=false;show('unmatchedError',false);if(selectedPaymentId&&!payments.some(p=>p.id===selectedPaymentId)){selectedPaymentId=null;auditForId=null;auditEvents=[];}renderPayments();}
+      catch(error){if(error.code==='unauthorized')throw error;unmatchedFailed=true;text('unmatchedError','付款清單載入失敗：'+(error.message||'連線中斷')+' 可按「重新載入」重試。');show('unmatchedError',true);updateRecoveryControls();}
+    }
+    function renderPayments(){
+      const confirmed=payments.filter(p=>p.matchStatus==='unmatched'&&p.paymentStatus==='simulation_verified').length,pending=payments.filter(p=>p.paymentStatus==='simulation_pending'||p.paymentStatus==='pending').length,refunded=payments.filter(p=>p.paymentStatus==='simulation_refunded'||p.paymentStatus==='refunded').length,bound=payments.filter(p=>p.matchStatus==='bound').length;
+      text('unmatchedCount','已確認收款待配對 '+confirmed+' 筆 · 尚未確認收款 '+pending+' 筆 · 已退款 '+refunded+' 筆 · 已配對 '+bound+' 筆');
+      const normalize=value=>String(value||'').replace(/[\s\-‐‑‒–—―−－]/g,'').toLowerCase(),query=normalize($('paymentSearch').value),visible=payments.filter(p=>[p.orderId,p.payerName,p.payerPhone,p.remarkName,p.remarkCaseId].some(value=>normalize(value).includes(query)));
+      text('paymentSearchCount',query?'搜尋結果 '+visible.length+' 筆':'可依客戶提供的付款訂單編號尋找收據。');$('paymentsList').replaceChildren();show('paymentsEmpty',visible.length===0);text('paymentsEmpty',query?'找不到符合搜尋條件的付款訂單。':'還沒有合成付款訂單。可從上方建立漏填情境。');
+      for(const p of visible){const node=$('paymentTemplate').content.firstElementChild.cloneNode(true);node.querySelector('.payment-name').textContent=p.payerName||'付款姓名未填';node.querySelector('.payment-ref').textContent=p.orderId||p.id||'—';badge(node.querySelector('.funds-badge'),fundsLabel(p));badge(node.querySelector('.match-badge'),matchLabel(p));node.querySelector('.payment-phone').textContent=p.payerPhone||'付款電話未填';node.querySelector('.payment-amount').textContent=money(p.total);node.setAttribute('aria-pressed',String(p.id===selectedPaymentId));node.dataset.available=String(!!p.id);node.disabled=busy||!p.id;node.addEventListener('click',()=>run(async()=>{if(selectedPaymentId!==p.id){selectedPaymentId=p.id;$('bindTarget').value='';$('bindReason').value='';$('bindConfirm').checked=false;auditForId=null;auditEvents=[];}renderPayments();await loadAudit(p.id);if(window.innerWidth<=780)$('paymentDetail').scrollIntoView({behavior:'smooth',block:'start'});}));$('paymentsList').append(node);}
+      renderPaymentDetail();updateRecoveryControls();
+    }
+    function renderPaymentDetail(){
+      const p=selectedPayment();show('paymentDetail',!!p);show('paymentSelectionEmpty',!p);if(!p)return;
+      text('paymentOrderId',p.orderId||p.id);badge($('paymentFundsStatus'),fundsLabel(p));badge($('paymentMatchStatus'),matchLabel(p));
+      text('paymentPayerName',p.payerName||'未填寫');text('paymentPayerPhone',p.payerPhone||'未填寫');text('paymentPayerAddress',addressText(p.payerAddress)||'未填寫');text('paymentTotal',money(p.total));text('paymentCurrency',p.currency||'未提供');text('paymentRemarkCase',p.remarkCaseId||'未填寫');text('paymentRemarkName',p.remarkName||'未填寫');text('paymentCreated',dateText(p.createdAt));
+      const bound=p.matchStatus==='bound';show('paymentBound',bound);text('paymentBoundCase','已綁定案件：'+(p.boundCaseId||'—')+'；報價：'+(p.boundQuoteId||'—'));show('bindForm',!bound);show('candidateSuggestions',!bound);
+      const candidates=Array.isArray(p.candidates)?p.candidates:[];show('candidatesEmpty',candidates.length===0);renderMatching('payment',p.matching);renderCandidates('matchingCandidates',candidates);
+      populateTargetQuotes(p);renderAudit();updateRecoveryControls();
+    }
+    function renderAudit(){
+      $('auditList').replaceChildren();const entries=auditForId===selectedPaymentId?auditEvents:[];show('auditEmpty',entries.length===0);
+      text('auditEmpty',auditForId===selectedPaymentId?'尚無稽核紀錄。':'選取訂單後載入唯讀稽核紀錄。');
+      for(const event of entries){const node=$('auditTemplate').content.firstElementChild.cloneNode(true),state=event.state==='bound'?'人工配對成功（演練）':event.state==='blocked'?'配對遭阻擋（演練）':'配對稽核紀錄';node.querySelector('strong').textContent=state;node.querySelector('.audit-reason').textContent='核對理由：'+(event.reason||'—');const before=event.before||{},after=event.after||{};node.querySelector('.audit-target').textContent='原案件：'+(before.caseId||'未配對')+' → 核對後：'+(after.caseId||'未配對');node.querySelector('span').textContent=dateText(event.createdAt)+' · 操作人員：'+(!event.actor||event.actor==='admin'?'管理員':event.actor);$('auditList').append(node);}
+    }
+    async function loadAudit(id){
+      if(!id)return;show('auditError',false);
+      try{const data=await api('/api/payment-lab/unmatched/'+encodeURIComponent(id)+'/audit');requireSimulation(data);if(selectedPaymentId!==id)return;auditForId=id;auditEvents=Array.isArray(data.events)?data.events:[];renderAudit();}
+      catch(error){if(error.code==='unauthorized')throw error;if(selectedPaymentId===id){text('auditError','稽核紀錄載入失敗：'+(error.message||'連線中斷')+' 可按「重新載入紀錄」重試。');show('auditError',true);}}
+    }
+    function rememberPayment(p){if(!p||!p.id)return;const index=payments.findIndex(item=>item.id===p.id);if(index<0)payments.unshift(p);else payments[index]=p;selectedPaymentId=p.id;renderPayments();}
+    function shoplineOrderKey(order){return String(order&&(order.id||order.orderNumber)||'');}
+    function shoplineError(status){const key=Object.prototype.hasOwnProperty.call(shoplineMessages,status)?status:'invalid_response';const error=new Error(shoplineMessages[key][1]);error.shoplineStatus=key;return error;}
+    function readonlyFlags(data){return data&&data.simulation===false&&data.readOnly===true&&data.internalOnly===true&&data.realPayment===false&&data.releaseAllowed===false;}
+    async function shoplineRequest(path,body){
+      let response;try{response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',redirect:'error',headers:body===undefined?{'Accept':'application/json'}:{'Accept':'application/json','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});}catch{throw shoplineError('unavailable');}
+      let data;try{data=await response.json();}catch{throw shoplineError('invalid_response');}
+      if((response.status===401||response.status===403)&&!readonlyFlags(data)){loginView();const error=new Error('管理員登入已失效，請重新登入後再讀取。');error.code='unauthorized';throw error;}
+      if(!readonlyFlags(data)){if(response.status===429)throw shoplineError('rate_limited');if(response.status>=500||response.status===404)throw shoplineError('unavailable');throw shoplineError('invalid_response');}
+      if(!Object.prototype.hasOwnProperty.call(shoplineMessages,data.status))throw shoplineError('invalid_response');
+      return data;
+    }
+    function applyShoplineState(data){
+      shoplineConfigured=data.configured===true;shoplineStatus=data.status;shoplineOrders=Array.isArray(data.orders)?data.orders:[];shoplineLastFetchedAt=data.lastFetchedAt||null;
+      shoplineCaseCount=Number.isInteger(data.caseCandidateCount)&&data.caseCandidateCount>=0?data.caseCandidateCount:null;shoplineAmountsAvailable=typeof data.caseAmountsAvailable==='boolean'?data.caseAmountsAvailable:null;
+      if(typeof data.truncated==='boolean')shoplineTruncated=data.truncated;else if(!shoplineOrders.length)shoplineTruncated=false;
+      if(selectedShoplineOrderId&&!shoplineOrders.some(order=>shoplineOrderKey(order)===selectedShoplineOrderId))selectedShoplineOrderId=null;
+      renderShopline();
+    }
+    async function shoplineAction(fn){try{applyShoplineState(await fn());}catch(error){if(error.code==='unauthorized')throw error;shoplineStatus=error.shoplineStatus||'unavailable';renderShopline();}}
+    async function loadShoplineState(){await shoplineAction(()=>shoplineRequest('/api/payment-lab/shopline/state'));}
+    function updateShoplineControls(){
+      const orderMode=$('shoplineQueryMode').value==='order';
+      $('shoplineToken').disabled=busy;$('shoplineConfigureButton').disabled=busy||!$('shoplineToken').value.trim();$('shoplineQueryMode').disabled=busy;
+      $('shoplineDays').disabled=busy||orderMode;$('shoplineOrderNumber').disabled=busy||!orderMode;$('shoplineOrderNumber').required=orderMode;
+      show('shoplineDaysField',!orderMode);show('shoplineOrderField',orderMode);
+      $('shoplineFetchButton').disabled=busy||!shoplineConfigured;$('shoplineRefreshButton').disabled=busy;
+      for(const node of document.querySelectorAll('.shopline-item'))node.disabled=busy||node.dataset.available!=='true';
+    }
+    function orderAmount(order){if(typeof order.total!=='number'||!Number.isFinite(order.total))return '金額待確認';return order.currency==='TWD'?money(order.total):(order.currency||'幣別未提供')+' '+order.total.toLocaleString('zh-TW',{maximumFractionDigits:2});}
+    function reportedStatus(value){const labels={completed:'已付款',paid:'已付款',pending:'未付款',temp:'未付款',unpaid:'未付款',failed:'付款失敗',expired:'逾期',refunding:'退款中',refunded:'已退款',partially_paid:'部分付款',partially_refunded:'部分退款',cancelled:'已取消'};const key=typeof value==='string'?value.toLowerCase():'';return (labels[key]||'狀態待核對')+'（SHOPLINE 回報，尚未核實）';}
+    function renderShoplineReviewReasons(order){
+      const labels={non_twd:'訂單幣別不是新臺幣（TWD），需人工核對。',missing_currency:'未提供訂單幣別，需人工核對。',invalid_total:'訂單總額缺少或格式無法確認，需人工核對。',mixed_cart:'訂單含其他商品或多筆商品明細，需分別核對維修費用。',unsupported_item_type:'商品明細類型無法確認為一般商品，需人工核對。',invalid_unit_price:'維修商品單價不是 NT$1，或單價資料無法確認。',invalid_quantity:'維修商品數量缺少或格式無法確認，需人工核對。',invalid_item_total:'維修商品小計與數量金額不一致，或小計資料無法確認。',order_total_mismatch:'訂單總額與一元商品數量金額不同，可能含額外運費或折抵，需人工核對實際應付金額。',invalid_payment_total:'付款金額資料缺少或格式無法確認，需人工核對。',payment_total_mismatch:'付款金額與訂單總額不一致，需人工核對。',invalid_order_number:'訂單編號資料缺少或格式無法確認，需人工核對。',unknown_payment_status:'SHOPLINE 回報的付款狀態無法辨識，需人工核對。'};
+      const reasons=Array.isArray(order.reviewReasons)?order.reviewReasons:[],messages=[...new Set(reasons.map(reason=>typeof reason==='string'&&Object.prototype.hasOwnProperty.call(labels,reason)?labels[reason]:'尚有未辨識的核對項目，待人工核對。'))];
+      if(messages.length===0)messages.push(order.productValid===true?'目前未列出需核對項目；金流仍尚未核實。':'未取得完整核對資訊，待人工核對。');
+      const list=$('shoplineReviewReasons');list.replaceChildren();for(const message of messages){const item=document.createElement('li');item.textContent=message;list.append(item);}
+    }
+    function renderShopline(){
+      const messages=shoplineMessages[shoplineStatus]||shoplineMessages.invalid_response;text('shoplineStatusTitle',messages[0]);text('shoplineStatusMessage',messages[1]);$('shoplineStatus').dataset.state=['ok','not_checked','not_configured'].includes(shoplineStatus)?'info':'error';
+      text('shoplineConfigured',shoplineConfigured?'已設定讀取憑證；這裡不會顯示 Token 內容。':'尚未設定讀取憑證。');text('shoplineLastFetched','最近成功讀取時間：'+(shoplineLastFetchedAt?dateText(shoplineLastFetchedAt):'尚無'));
+      text('shoplineCaseScope',(shoplineCaseCount===null?'目前可比對案件數尚未取得。':'目前可比對案件 '+shoplineCaseCount+' 筆。')+(shoplineAmountsAvailable===false?'目前未接入案件應付金額，請由客服核對報價與付款，身份吻合仍不直接認列付款。':'目前僅提供身份候選建議，仍須客服核對，不直接認列付款。'));
+      const stale=shoplineOrders.length>0&&shoplineStatus!=='ok';show('shoplineStale',stale);text('shoplineStale','目前顯示上次成功讀取的資料'+(shoplineLastFetchedAt?'（'+dateText(shoplineLastFetchedAt)+'）':'')+'；本次狀態未確認更新，請勿視為最新訂單資料。');show('shoplineTruncated',shoplineTruncated&&shoplineOrders.length>0);
+      text('shoplineOrderCount',shoplineOrders.length+' 筆真實訂單預覽 · 全部尚未核實金流');$('shoplineOrdersList').replaceChildren();show('shoplineOrdersEmpty',shoplineOrders.length===0);text('shoplineOrdersEmpty',shoplineStatus==='ok'?'本次查詢未找到本維修一元商品的訂單。':'尚無可顯示的訂單預覽。設定憑證後，請主動按「讀取訂單」。');
+      for(const order of shoplineOrders){const node=$('shoplineOrderTemplate').content.firstElementChild.cloneNode(true),key=shoplineOrderKey(order);node.querySelector('.shopline-order-number').textContent=order.orderNumber||order.id||'未提供訂單編號';node.querySelector('.shopline-order-meta').textContent=reportedStatus(order.reportedPaymentStatus);node.querySelector('.shopline-order-customer').textContent=order.customerName||order.recipientName||'未提供姓名';node.querySelector('.shopline-order-total').textContent=orderAmount(order);node.setAttribute('aria-pressed',String(key===selectedShoplineOrderId));node.dataset.available=String(!!key);node.disabled=busy||!key;node.addEventListener('click',()=>{if(busy)return;selectedShoplineOrderId=key;renderShopline();if(window.innerWidth<=780)$('shoplineOrderDetail').scrollIntoView({behavior:'smooth',block:'start'});});$('shoplineOrdersList').append(node);}
+      renderShoplineDetail();updateShoplineControls();
+    }
+    function renderShoplineDetail(){
+      const order=shoplineOrders.find(item=>shoplineOrderKey(item)===selectedShoplineOrderId);show('shoplineOrderDetail',!!order);show('shoplineSelectionEmpty',!order);if(!order)return;
+      text('shoplineDetailNumber','訂單 '+(order.orderNumber||order.id||'—'));text('shoplineCustomerName',order.customerName||'未提供');text('shoplineCustomerPhone',order.customerPhone||'未提供');text('shoplineRecipientName',order.recipientName||'未提供');text('shoplineRecipientPhone',order.recipientPhone||'未提供');text('shoplineAddress',addressText(order.address)||'未提供');text('shoplineRemarks',order.orderRemarks||'未填寫');text('shoplineTotal',orderAmount(order));text('shoplineCurrency',order.currency||'未提供');text('shoplineProductValid',order.productValid===true?'商品與金額基本核對通過（尚未核實金流）':'已找到指定維修一元商品；商品與金額仍有待核對項目');renderShoplineReviewReasons(order);text('shoplineReportedStatus',reportedStatus(order.reportedPaymentStatus));text('shoplineCreated',dateText(order.createdAt));text('shoplineFetched',dateText(order.fetchedAt||shoplineLastFetchedAt));
+      const matching=order.matching&&typeof order.matching==='object'?order.matching:{},candidates=Array.isArray(matching.candidates)?matching.candidates:[];renderMatching('shopline',matching.assessment);renderCandidates('shoplineCandidates',candidates);show('shoplineCandidatesEmpty',candidates.length===0);
+    }
+    $('warranty').addEventListener('change',()=>{const yes=$('warranty').checked;if(yes){savedRepairFee=$('repairFee').value;$('repairFee').value='0';}else{$('repairFee').value=savedRepairFee||'0';}$('repairFee').disabled=yes;show('warrantyHelp',yes);draftSummary();});
+    $('repairFee').addEventListener('input',draftSummary);$('pickup').addEventListener('change',draftSummary);
+    $('scenario').addEventListener('change',()=>text('scenarioHelp',scenarios[$('scenario').value]||''));
+    $('loginForm').addEventListener('submit',event=>{event.preventDefault();run(async()=>{try{await api('/api/admin-login',{password:$('password').value});}finally{$('password').value='';}await loadState();});});
+    $('quoteForm').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
+      const repairFee=$('warranty').checked?0:Number($('repairFee').value);
+      if(!Number.isSafeInteger(repairFee)||repairFee<0||!Number.isSafeInteger(repairFee+($('pickup').checked?350:0)))throw new Error('維修費請填寫大於或等於 0 的有效整數。');
+      const phone=$('phone').value.replace(/[\s-]/g,'');
+      if(phone&&!/^09[0-9]{8}$/.test(phone))throw new Error('測試電話請留空，或填寫 09 開頭的 10 碼號碼，例如 0900000000。');
+      const body={name:$('name').value.trim(),phone,address:$('address').value.trim(),repairFee,warranty:$('warranty').checked,pickup:$('pickup').checked};
+      if(!body.name)throw new Error('請填寫虛構的測試姓名。');
+      const result=await api('/api/payment-lab/quotes',body),quote=result.quote||result;
+      selectedId=identifier(quote)||null;await loadState();notify('測試報價已建立，只保存於演練資料。');
+    });});
+    $('simulateButton').addEventListener('click',()=>run(async()=>{
+      if(!selectedId)throw new Error('請先選擇一筆測試報價。');
+      const result=await api('/api/payment-lab/simulate',{quoteId:selectedId,scenario:$('scenario').value});
+      await loadState();
+      const q=quotes.find(item=>identifier(item)===selectedId), outcome=result.result||result;
+      const resultLabels={processed:'本次演練：伺服器已處理',blocked:'本次演練：已阻擋',duplicate:'本次演練：重複通知未重複處理'};
+      show('simulationResult',true);text('resultStatus',resultLabels[outcome.state]||'本次演練已執行');
+      text('resultMessage',first(outcome,['verificationMessage','reason','message'])||(q&&first(q,['verificationMessage','reason','message','lastMessage']))||'伺服器已處理測試事件，請查看上方付款狀態。');text('resultTime','本次查看時間：'+dateText(new Date().toISOString()));notify('付款情境演練已完成；未扣款、未發送 LINE，也未建立派車。');
+    }));
+    $('unmatchedSource').addEventListener('change',updateRecoveryControls);
+    $('unmatchedScenario').addEventListener('change',()=>text('unmatchedScenarioHelp',unmatchedScenarios[$('unmatchedScenario').value]||''));
+    $('paymentSearch').addEventListener('input',renderPayments);
+    for(const id of ['bindTarget','bindConfirm'])$(id).addEventListener('change',updateRecoveryControls);
+    $('bindReason').addEventListener('input',updateRecoveryControls);
+    $('refreshUnmatchedButton').addEventListener('click',()=>run(async()=>{await loadUnmatched();if(selectedPaymentId&&!unmatchedFailed)await loadAudit(selectedPaymentId);}));
+    $('refreshAuditButton').addEventListener('click',()=>run(()=>loadAudit(selectedPaymentId)));
+    $('createUnmatchedButton').addEventListener('click',()=>run(async()=>{
+      const source=quotes.find(q=>identifier(q)===$('unmatchedSource').value);
+      if(!source||source.status!=='active'||!(fee(source,'total')>0))throw new Error('請選擇有效且需要付款的來源測試報價。');
+      const result=await api('/api/payment-lab/unmatched/simulate',{quoteId:identifier(source),scenario:$('unmatchedScenario').value});requireSimulation(result);
+      $('paymentSearch').value='';$('bindTarget').value='';$('bindReason').value='';$('bindConfirm').checked=false;auditForId=null;auditEvents=[];rememberPayment(result.payment);
+      await loadUnmatched();if(selectedPaymentId)await loadAudit(selectedPaymentId);notify('漏填合成訂單已建立。漏填不用重複付款，請依收款狀態與客戶 LINE 訂單進行人工核對。');
+    }));
+    $('bindForm').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
+      const p=selectedPayment(),target=quotes.find(q=>identifier(q)===$('bindTarget').value),reason=$('bindReason').value.trim();
+      if(!p||p.matchStatus!=='unmatched'||p.paymentStatus!=='simulation_verified')throw new Error('只有已確認收款且尚未配對的演練付款可以綁定。');
+      if(unmatchedFailed)throw new Error('請先重新載入付款清單，再進行綁定。');
+      if(!target||quoteBlockReason(target,p))throw new Error('請選擇有效且金額、幣別相同的測試報價。');
+      if(Array.from(reason).length<8||Array.from(reason).length>500)throw new Error('核對理由請填寫 8–500 字。');
+      if(!$('bindConfirm').checked)throw new Error('請先確認已核對客戶 LINE 提供的付款訂單與案件關係。');
+      let result;try{result=await api('/api/payment-lab/unmatched/'+encodeURIComponent(p.id)+'/bind',{quoteId:identifier(target),reason,confirm:true});}catch(error){await loadAudit(p.id);throw error;}
+      requireSimulation(result);rememberPayment(result.payment);$('bindReason').value='';$('bindConfirm').checked=false;
+      await loadState();await loadAudit(p.id);
+      const bound=result.payment;notify((result.result&&result.result.state==='duplicate'?'此筆測試付款已有配對紀錄。':'人工配對演練成功。')+' 已綁定案件 '+(bound&&bound.boundCaseId||target.caseId)+'；稽核紀錄可於下方唯讀查看。漏填不用重複付款，未放行真實案件或派車。');
+    });});
+    $('shoplineToken').addEventListener('input',updateShoplineControls);
+    $('shoplineQueryMode').addEventListener('change',updateShoplineControls);
+    $('shoplineTokenForm').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
+      const token=$('shoplineToken').value.trim();$('shoplineToken').value='';updateShoplineControls();
+      if(!token)throw new Error('請先輸入本次測試用 Token。');
+      await shoplineAction(()=>shoplineRequest('/api/payment-lab/shopline/configure',{token}));
+    });});
+    $('shoplineFetchForm').addEventListener('submit',event=>{event.preventDefault();run(async()=>{
+      if(!shoplineConfigured)throw new Error('請先設定本次唯讀憑證，再讀取訂單。');
+      let query;
+      if($('shoplineQueryMode').value==='order'){const orderNumber=$('shoplineOrderNumber').value.trim();if(!orderNumber)throw new Error('請填寫客戶提供的付款訂單編號。');query={orderNumber};}
+      else{const days=Number($('shoplineDays').value);if(![7,14,30].includes(days))throw new Error('請選擇最近 7、14 或 30 天。');query={days};}
+      await shoplineAction(()=>shoplineRequest('/api/payment-lab/shopline/fetch',query));
+    });});
+    $('shoplineRefreshButton').addEventListener('click',()=>run(loadShoplineState));
+    $('refreshButton').addEventListener('click',()=>run(loadState));$('retryButton').addEventListener('click',()=>run(loadState));
+    $('logoutButton').addEventListener('click',()=>run(async()=>{await api('/api/logout',{});loginView();notify('已登出管理員。');}));
+    text('scenarioHelp',scenarios.paid);text('unmatchedScenarioHelp',unmatchedScenarios.missing_case);draftSummary();updateRecoveryControls();updateShoplineControls();
+    run(async()=>{try{await loadState();}catch(error){if(error.code==='unauthorized')return;if($('loginPanel').hidden&&$('unavailablePanel').hidden){show('loading',false);loginView();}throw error;}});
+  </script>
+</body>
+</html>

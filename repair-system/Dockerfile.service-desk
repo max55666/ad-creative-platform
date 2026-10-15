@@ -1,0 +1,10 @@
+# Independent INTERNAL TEST service; never use the production startup module.
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TZ=Asia/Taipei
+WORKDIR /app
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY server.py line_support.py cloud_support.py dispatch_cards.py dispatch_workflow.py payment_lab.py shopline_readonly.py shopline_orders.py shopline_preview.py order_matching.py service_desk.py service_desk_reconciliation.py service_desk_automation.py line_test_sender.py payment_sheet_sync.py payment_sheet_transport.py payment_sheet_worker.py service_desk_cloud.py service_desk_cloud_start.py ./
+COPY service-desk.html settings.json ./
+EXPOSE 10000
+CMD ["python", "service_desk_cloud_start.py"]
