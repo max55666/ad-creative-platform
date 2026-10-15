@@ -177,6 +177,49 @@ def service_desk_after_payment(result, case_id):
             'operations': service_desk_refresh_operations(case_id)}
 
 
+def service_desk_mark_dispatched(case_id, payload, actor):
+    if (type(payload) is not dict or set(payload) != {'expectedVersion', 'requestId', 'reason'}
+            or type(payload['expectedVersion']) is not int or payload['expectedVersion'] < 1
+            or type(payload['reason']) is not str or not 1 <= len(payload['reason'].strip()) <= 500
+            or any(ord(char) < 32 or ord(char) == 127 for char in payload['reason'])):
+        raise ValueError('內測派車作業欄位不正確')
+    service_desk_request_id(payload['requestId'])
+    current = SERVICE_DESK_OPERATIONS.case_state(case_id)
+    if current.get('internalDispatchAllowed') is not True:
+        # Local rejection needs no provider request. An exact retry of an
+        # already completed command can still return its current idempotent
+        # result; mark_dispatched rejects every other non-ready case itself.
+        return SERVICE_DESK_OPERATIONS.mark_dispatched(case_id, payload, actor=actor)
+    if payload['expectedVersion'] != current.get('operationsVersion'):
+        raise ValueError('內測作業版本已變更，請重新整理後再操作')
+    wrapper = service_desk_scoped_quote(current.get('quoteId'))
+    quote = wrapper['quote']
+    if (wrapper['case']['id'] != case_id or wrapper['case'].get('pickup') is not True
+            or type(quote.get('total')) is not int or quote['total'] <= 0):
+        raise ValueError('此案件不是已通過付款門檻的派車案件')
+    number = service_desk_bound_order(quote['id'])
+    order = service_desk_fetch_exact_order(number)
+    observation = service_desk_reconciliation_service().record(order, wrapper, str(uuid.uuid4()),
+        provenance={'freshProviderLookup': True, 'readOnly': True})
+    after = service_desk_after_payment(observation, case_id)
+    decision = observation.get('result', {})
+    facts = decision.get('facts', {})
+    if (observation.get('source') != 'shopline_api_completed'
+            or decision.get('state') not in ('matched_internal_only', 'duplicate')
+            or decision.get('reasons') != [] or facts.get('providerPaymentStatus') != 'completed'
+            or facts.get('freshProviderLookup') is not True or facts.get('currentQuote') is not True
+            or facts.get('quoteVersion') != quote['version']
+            or after['operations'].get('internalDispatchAllowed') is not True):
+        raise ValueError('本次付款或退款重新核對未通過，已停止內測派車；請重新整理案件')
+    # The operations transaction rechecks local evidence and the optimistic
+    # version. A provider refund observed while polling was idle cannot use the
+    # previously green UI state to dispatch.
+    result = SERVICE_DESK_OPERATIONS.mark_dispatched(case_id, payload, actor=actor)
+    return {**result, 'paymentSheetSync': after['paymentSheetSync'],
+            'dispatchPaymentCheck': {'freshProviderLookup': True, 'orderNumber': number,
+                                     'providerPaymentStatus': 'completed'}}
+
+
 def service_desk_manual_match(quote_id, payload, actor):
     if type(payload) is not dict or set(payload) != {'orderNumber', 'requestId', 'confirm', 'reason'}:
         raise ValueError('人工配對只接受訂單編號、確認、原因與請求識別碼')
@@ -1443,9 +1486,13 @@ class Handler(BaseHTTPRequestHandler):
                 if SERVICE_DESK_OPERATIONS is None:
                     return self.payment_lab_send(503, {'error': '內測派車門檻尚未設定'})
                 operator = self.user().get('name') or self.user().get('displayName') or '管理員'
-                callback = (SERVICE_DESK_OPERATIONS.mark_dispatched if action == 'dispatch'
-                            else SERVICE_DESK_OPERATIONS.record_refund_action)
-                return self.payment_lab_send(200, callback(identity, data, actor=operator))
+                if action == 'dispatch':
+                    from shopline_preview import PreviewBusy
+                    try:
+                        return self.payment_lab_send(200, service_desk_mark_dispatched(identity, data, operator))
+                    except PreviewBusy:
+                        return self.payment_lab_send(429, {'error': '請稍候再核對付款；本次未記錄內測派車'}, {'Retry-After': '30'})
+                return self.payment_lab_send(200, SERVICE_DESK_OPERATIONS.record_refund_action(identity, data, actor=operator))
             if action in ('manual-match', 'refund-refresh', 'refund-close'):
                 from shopline_preview import PreviewBusy
                 operator = self.user().get('name') or self.user().get('displayName') or '管理員'
