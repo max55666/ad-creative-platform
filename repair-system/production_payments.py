@@ -314,6 +314,25 @@ class ProductionPayments:
         except Exception:
             return False
 
+    def can_requote_free(self, wb_id):
+        try:
+            self._current(wb_id)
+            return self.desk.can_requote_free(wb_id) is True
+        except Exception:
+            return False
+
+    def warranty_policy(self, wb_id):
+        allowed = False
+        try:
+            data = _case_data(self._current(wb_id))
+            order = data.get('order')
+            allowed = (data.get('orderChoice') != 'missing'
+                and type(order) is str and bool(order.strip()))
+        except Exception:
+            pass
+        return {'warrantyConfirmationAllowed': allowed,
+                'warrantyPolicy': '待客服核實' if allowed else '保固外'}
+
     def _queue_message(self, kind, quote, row=None):
         target = self.recipient(quote['caseId'])
         if kind == 'quote':
@@ -668,8 +687,11 @@ class ProductionPayments:
             'managed': 'paymentWorkflow' in data, 'legacy': 'paymentWorkflow' not in data,
             'version': 0, 'quote': None, 'payment': None, 'quoteHistory': [], 'audit': [],
             'receipts': [], 'refundNotices': [], 'notifications': [], 'lastCheck': None,
-            'releaseAllowed': self.is_allowed(case)}
+            'releaseAllowed': self.is_allowed(case), 'canRequoteFree': False,
+            'warrantyConfirmationAllowed': False, 'warrantyPolicy': '保固外'}
         if link:
+            result['canRequoteFree'] = self.can_requote_free(link['wb_id'])
+            result.update(self.warranty_policy(link['wb_id']))
             detail = self.desk.get_case(link['wb_id'])
             result.update(version=detail['case']['version'], quote=detail['case']['latestQuote'],
                 quoteHistory=detail['quotes'])
@@ -762,10 +784,13 @@ class ProductionPayments:
                     raise ValueError('核定金額欄位不正確')
                 wb = self.enroll(match[1])
                 self._current(wb)
+                if payload['warranty'] is True and not self.warranty_policy(wb)['warrantyConfirmationAllowed']:
+                    raise ValueError('未提供原購買訂單的案件一律屬保固外；可核定免收費，但不能勾選保固內')
                 case = self.desk.get_case(wb)['case']
                 if type(payload['repairFee']) is not int or payload['repairFee'] + (350 if case['pickup'] else 0) > 100000:
                     raise ValueError('本次應付合計不可超過 100,000 元')
-                result = self.desk.approve_quote(wb, payload)
+                result = self.desk.approve_quote(wb, payload,
+                    allow_free_requote=self.can_requote_free(wb))
                 if result['quote']['total']:
                     self._queue_message('quote', result['quote'])
                 self.after_payment(result['quote']['id'])

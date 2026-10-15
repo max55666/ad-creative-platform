@@ -373,8 +373,48 @@ class ServiceDesk:
         self._audit(c, case['id'], 'notification_failed' if error else 'notification_simulated',
                     error or '已模擬 LINE 付款通知；未發送真實訊息')
 
-    def approve_quote(self, case_id, payload):
+    @staticmethod
+    def _free_requote_allowed(c, case):
+        """A server-only correction of a free quote never clears financial history."""
+        quote = case.get('latestQuote') if case else None
+        if (not quote or case.get('source') not in ('snapshot', 'test_intake')
+                or case.get('status') != 'no_payment_required'
+                or quote.get('status') != 'active'
+                or quote.get('paymentStatus') != 'no_payment_required'
+                or quote.get('acceptedOrderId') or quote.get('version') != case.get('version')
+                or quote.get('currency') != 'TWD'
+                or any(type(quote.get(field)) is not int or quote[field] != 0
+                       for field in ('repairFee', 'pickupFee', 'total'))):
+            return False
+        case_id = case['id']
+        if c.execute("""SELECT 1 FROM wb_quotes WHERE case_id=? AND
+            (accepted_order_id<>'' OR payment_status IN ('simulated_paid','refunded')) LIMIT 1""",
+                     (case_id,)).fetchone():
+            return False
+        if c.execute("""SELECT 1 FROM wb_orders WHERE case_id=? AND
+            (bound_quote_id<>'' OR status IN ('accepted','refunded') OR outcome IN ('verified','refunded')) LIMIT 1""",
+                     (case_id,)).fetchone():
+            return False
+        tables = {row['name'] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'wb_real_order_checks' in tables and c.execute("""SELECT 1 FROM wb_real_order_checks
+            WHERE case_id=? AND (outcome='matched_internal_only' OR
+            json_extract(response,'$.result.facts.providerPaymentStatus') IN
+            ('refunding','refunded','partially_refunded')) LIMIT 1""", (case_id,)).fetchone():
+            return False
+        for table in ('wb_real_manual_approvals', 'wb_refund_followups'):
+            if table in tables and c.execute('SELECT 1 FROM ' + table + ' WHERE case_id=? LIMIT 1',
+                                             (case_id,)).fetchone():
+                return False
+        return True
+
+    def can_requote_free(self, case_id):
         _id(case_id, 'WB-')
+        with self._connection() as c:
+            return self._free_requote_allowed(c, self._case(c, case_id))
+
+    def approve_quote(self, case_id, payload, *, allow_free_requote=False):
+        _id(case_id, 'WB-')
+        _boolean(allow_free_requote)
         _object(payload, ('repairFee', 'warranty', 'expectedVersion', 'requestId', 'simulateFailure'),
                 ('repairFee', 'warranty', 'expectedVersion', 'requestId'))
         fee, warranty = _int(payload['repairFee']), _boolean(payload['warranty'])
@@ -392,7 +432,9 @@ class ServiceDesk:
                 raise ValueError('找不到內部演練案件')
             if case['version'] != expected:
                 raise ValueError('報價版本已變更，請重新整理案件後再核定')
-            if case['latestQuote'] and (case['latestQuote']['acceptedOrderId'] or case['latestQuote']['paymentStatus'] == 'no_payment_required'):
+            free_correction = allow_free_requote and self._free_requote_allowed(c, case)
+            if case['latestQuote'] and (case['latestQuote']['acceptedOrderId'] or
+                    (case['latestQuote']['paymentStatus'] == 'no_payment_required' and not free_correction)):
                 raise ValueError('已核對付款或免付款的案件不能直接改價，請先交由主管處理')
             real_checks = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_real_order_checks'").fetchone()
             if real_checks and case['latestQuote'] and c.execute("SELECT 1 FROM wb_real_order_checks WHERE quote_id=? AND outcome='matched_internal_only' LIMIT 1",
@@ -414,6 +456,8 @@ class ServiceDesk:
             c.execute('UPDATE wb_cases SET version=?,status=?,latest_quote_id=? WHERE id=?',
                       (version, payment_status, quote_id, case_id))
             self._audit(c, case_id, 'quote_approved', '核定第 %d 版：維修費 %d 元、派車費 %d 元、合計 %d 元' % (version, fee, pickup_fee, total))
+            if free_correction:
+                self._audit(c, case_id, 'free_quote_corrected', '更正免付款核定；保留第 %d 版紀錄，改以第 %d 版核定' % (case['version'], version))
             self._notify(c, case, quote_id, failure)
             self._remember(c, request_id, 'approve_quote:' + case_id, payload, quote_id)
             return {**FLAGS, 'case': self._case(c, case_id), 'quote': self._quote(c, quote_id), 'idempotent': False}
