@@ -237,7 +237,34 @@ def service_desk_refund_refresh(quote_id, payload, actor='管理員', close=Fals
 
 def service_desk_automation_status():
     if SERVICE_DESK_AUTOMATION is not None and service_desk_enabled():
-        return SERVICE_DESK_AUTOMATION.status()
+        state = SERVICE_DESK_AUTOMATION.status()
+        line_status = service_desk_line_test_status()
+        mode = line_status.get('recipientMode', 'allowlisted_test_only')
+        label = line_status.get('recipientLabel') or '指定內測 LINE'
+        if type(label) is not str or re.fullmatch(r'U[0-9a-f]{32}', label):
+            label = '指定內測 LINE'
+        quotes = []
+        for entry in state.get('quotes', []):
+            if type(entry) is not dict:
+                continue
+            recipient_label = label
+            if mode == 'case_bound_test':
+                recipient_label = '待確認測試 LINE'
+                try:
+                    wrapper = service_desk_service().get_quote(entry.get('quoteId'))
+                    case = wrapper.get('case', {}) if type(wrapper) is dict else {}
+                    if case.get('id') in service_desk_allowed_case_ids():
+                        candidate = case.get('lineName')
+                        recipient_label = (candidate.strip() if type(candidate) is str and candidate.strip()
+                            and len(candidate) <= 100 and not re.fullmatch(r'U[0-9a-f]{32}', candidate)
+                            and not any(ord(char) < 32 or ord(char) == 127 for char in candidate)
+                            else '已綁定測試 LINE')
+                except Exception:
+                    pass
+            quotes.append({**entry, 'recipientLabel': recipient_label})
+        return {**state, 'recipientMode': mode, 'recipientLabel': label,
+                'line': {**state.get('line', {}), 'recipientMode': mode, 'recipientLabel': label},
+                'quotes': quotes}
     return {'configured': False, 'running': False, 'quotes': [],
             'line': {'configured': False}, 'payment': {'configured': False},
             'internalOnly': True, 'realPayment': False, 'releaseAllowed': False}
