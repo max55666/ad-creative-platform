@@ -43,7 +43,8 @@ ENTRY_TICKET_PATTERN = re.compile(r'[A-Za-z0-9_-]{43}\Z')
 ENTRY_SESSION_FIELDS = ('officialEntry','officialEntryExpiresAt','officialEntryTicketHash','officialEntryBotUserId')
 SUMMARY_FIELDS_PATTERN = r'案件編號[：:][ \t]*(R\d{8}-\d{4,})[ \t]*\r?\n申請人[：:]([^\r\n]+)\r?\n訂單編號[：:]([^\r\n]+)'
 # Keep pre-update summaries valid for already-open customer pages.
-SUMMARY_SHIPPING_PATTERN = r'(?:\r?\n寄送方式[：:]([^\r\n]+))?'
+SUMMARY_CONTACT_PATTERN = r'(?:\r?\n聯絡電話[：:]([^\r\n]+)\r?\n寄回地址[：:]([^\r\n]+)\r?\n取件地址[：:]([^\r\n]+))?'
+SUMMARY_SHIPPING_PATTERN = r'(?:\r?\n寄送方式[：:]([^\r\n]+)'+SUMMARY_CONTACT_PATTERN+r')?'
 THREE_LINE_SUMMARY = re.compile(SUMMARY_FIELDS_PATTERN+SUMMARY_SHIPPING_PATTERN+r'\Z')
 CONFIRMATION_SUMMARY = re.compile(re.escape(CONFIRMATION_HEADING)+r'\r?\n'+SUMMARY_FIELDS_PATTERN+SUMMARY_SHIPPING_PATTERN+r'\r?\n\r?\n'+re.escape(SUMMARY_FOOTER)+r'\Z')
 CLOUD_WAKE = threading.Event()

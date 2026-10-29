@@ -518,15 +518,19 @@ def send_group_messages(token, group_id, messages, retry_key, opener=None):
 
 def submission_confirmation(case_id, case_data):
     """The initial receipt, using only the server's saved application fields."""
-    def one_line(value, fallback):
+    def one_line(value, fallback='無'):
         return re.sub(r'[\r\n]+', ' ', str(value or fallback)).strip() or fallback
-    applicant = one_line(case_data.get('name'), '未提供')
+    applicant = one_line(case_data.get('name'))
     order = ('無訂單編號／不記得了（保固外付費維修）'
              if case_data.get('orderChoice') == 'missing'
-             else one_line(case_data.get('order'), '未提供'))
-    shipping = one_line(case_data.get('shipping'), '未提供')
+             else one_line(case_data.get('order')))
+    shipping = one_line(case_data.get('shipping'))
+    phone = one_line(case_data.get('phone'))
+    return_address = one_line(case_data.get('returnAddress'))
+    pickup_address = one_line(case_data.get('pickupAddress'))
     return (f'【維修申請確認】\n案件編號：{case_id}\n申請人：{applicant}\n訂單編號：{order}'
             f'\n寄送方式：{shipping}'
+            f'\n聯絡電話：{phone}\n寄回地址：{return_address}\n取件地址：{pickup_address}'
             '\n\n如需補充資訊，請直接在此聊天室留言並附上案件編號。')
 
 
