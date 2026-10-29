@@ -524,7 +524,9 @@ def submission_confirmation(case_id, case_data):
     order = ('無訂單編號／不記得了（保固外付費維修）'
              if case_data.get('orderChoice') == 'missing'
              else one_line(case_data.get('order'), '未提供'))
+    shipping = one_line(case_data.get('shipping'), '未提供')
     return (f'【維修申請確認】\n案件編號：{case_id}\n申請人：{applicant}\n訂單編號：{order}'
+            f'\n寄送方式：{shipping}'
             '\n\n如需補充資訊，請直接在此聊天室留言並附上案件編號。')
 
 

@@ -42,8 +42,10 @@ NONCE_PATTERN = re.compile(r'[A-Za-z0-9_-]{32}\Z')
 ENTRY_TICKET_PATTERN = re.compile(r'[A-Za-z0-9_-]{43}\Z')
 ENTRY_SESSION_FIELDS = ('officialEntry','officialEntryExpiresAt','officialEntryTicketHash','officialEntryBotUserId')
 SUMMARY_FIELDS_PATTERN = r'案件編號[：:][ \t]*(R\d{8}-\d{4,})[ \t]*\r?\n申請人[：:]([^\r\n]+)\r?\n訂單編號[：:]([^\r\n]+)'
-THREE_LINE_SUMMARY = re.compile(SUMMARY_FIELDS_PATTERN+r'\Z')
-CONFIRMATION_SUMMARY = re.compile(re.escape(CONFIRMATION_HEADING)+r'\r?\n'+SUMMARY_FIELDS_PATTERN+r'\r?\n\r?\n'+re.escape(SUMMARY_FOOTER)+r'\Z')
+# Keep pre-update summaries valid for already-open customer pages.
+SUMMARY_SHIPPING_PATTERN = r'(?:\r?\n寄送方式[：:]([^\r\n]+))?'
+THREE_LINE_SUMMARY = re.compile(SUMMARY_FIELDS_PATTERN+SUMMARY_SHIPPING_PATTERN+r'\Z')
+CONFIRMATION_SUMMARY = re.compile(re.escape(CONFIRMATION_HEADING)+r'\r?\n'+SUMMARY_FIELDS_PATTERN+SUMMARY_SHIPPING_PATTERN+r'\r?\n\r?\n'+re.escape(SUMMARY_FOOTER)+r'\Z')
 CLOUD_WAKE = threading.Event()
 CLOUD_LOCK = threading.Lock()
 CLOUD_WORKER_STARTED = False
@@ -1454,7 +1456,7 @@ class Handler(BaseHTTPRequestHandler):
                           and re.search(r'^申請人[：:][^\r\n]+$',text,re.MULTILINE)
                           and re.search(r'^訂單編號[：:][^\r\n]+$',text,re.MULTILINE))
             compact_summary=THREE_LINE_SUMMARY.fullmatch(text) or CONFIRMATION_SUMMARY.fullmatch(text)
-            if compact_summary and compact_summary.group(2).strip() and compact_summary.group(3).strip():
+            if compact_summary and all(value.strip() for value in compact_summary.groups() if value is not None):
                 full_summary=True
             with connect() as c:
                 row=c.execute('SELECT id,user_id FROM cases WHERE id=? AND user_id=?',(match.group(1),uid)).fetchone()
