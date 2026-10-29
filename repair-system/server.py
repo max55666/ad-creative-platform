@@ -1345,7 +1345,7 @@ class Handler(BaseHTTPRequestHandler):
             clean.update({'shipping':shipping,
                           'pickupFeeTwd':350 if shipping == '由客服派遣物流回收' else None,
                           'shippingNote':'親自送回時，請先將商品妥善裝箱，並交由管理室代收。為維護商品安全，未裝箱之商品，管理室恕無法代收，敬請見諒。\n若技師評估包裝強度不足，可能於運送途中造成商品損壞，為保障商品安全，我們將於維修完成後通知您親自領回。\n若您了解上述風險後，仍選擇以寄送方式領回，運送途中之商品損壞風險須由您自行承擔，本公司恕無法負擔相關損壞之賠償責任。' if shipping == '親自送回' else ''})
-            clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-16-v6'})
+            clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-29-v7'})
             if PAYMENTS is not None and PAYMENTS.new_cases_enabled is True:
                 clean['paymentWorkflow']=PAYMENT_WORKFLOW
             now=time.strftime('%Y-%m-%d %H:%M:%S'); day=time.strftime('%Y%m%d')
