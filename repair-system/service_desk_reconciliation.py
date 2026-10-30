@@ -15,7 +15,7 @@ import re
 import sqlite3
 import uuid
 
-from order_matching import normalize_phone
+from order_matching import normalize_name, normalize_phone
 
 
 FLAGS = {'internalOnly': True, 'simulation': False, 'readOnly': True,
@@ -29,7 +29,8 @@ _CASE_NUMBER = re.compile(r'R[0-9]{8}-[0-9]{4,8}\Z')
 _ORDER_FIELDS = ('id', 'orderNumber', 'customerName', 'customerPhone',
     'recipientName', 'recipientPhone', 'address', 'orderRemarks', 'currency',
     'total', 'productValid', 'reportedPaymentStatus', 'reportedPaidAt',
-    'createdAt', 'paymentVerified', 'verificationStatus', 'reviewReasons')
+    'createdAt', 'paymentVerified', 'verificationStatus', 'reviewReasons', 'repairAllocation')
+_REPAIR_PRODUCT_ID = '6ad05b22cda4796778761cd2'
 MESSAGES = {
     'matched_internal_only': '內測配對成功；SHOPLINE API 回報付款完成，僅記錄本機核對結果，尚未驗證金流入帳，未更新正式案件或放行派車。',
     'already_matched_internal_only': '此訂單與報價已有相同內測配對紀錄，未重複配對或認列付款。',
@@ -136,6 +137,25 @@ def _missing_remark_exception(value, case):
                for label, value in values.items())
 
 
+def _valid_repair_allocation(value, order_total, repair_amount):
+    """Validate the server-normalized allocation without rewriting order money."""
+    keys = {'schema', 'productId', 'quantity', 'unitPrice', 'repairAmount',
+            'otherAmount', 'orderTotal', 'paymentTotal', 'fingerprint'}
+    if (type(value) is not dict or set(value) != keys
+            or value.get('schema') != 'repair-allocation-v1'
+            or value.get('productId') != _REPAIR_PRODUCT_ID
+            or type(value.get('fingerprint')) is not str
+            or re.fullmatch(r'[0-9a-f]{64}', value['fingerprint']) is None
+            or type(order_total) is not int or type(repair_amount) is not int):
+        return False
+    if any(type(value.get(key)) is not int or not 1 <= value[key] <= 100000
+           for key in ('quantity', 'unitPrice', 'repairAmount', 'otherAmount', 'orderTotal', 'paymentTotal')):
+        return False
+    return (value['unitPrice'] == 1 and value['quantity'] == value['repairAmount'] == repair_amount
+            and value['repairAmount'] + value['otherAmount'] == value['orderTotal']
+            and value['paymentTotal'] == value['orderTotal'] == order_total)
+
+
 class RealOrderReconciliation:
     def __init__(self, connection_factory):
         self.connection_factory = connection_factory
@@ -210,6 +230,54 @@ class RealOrderReconciliation:
                 response['source'] = 'shopline_api_completed'
             else:
                 result.update(code=result['reasons'][0], message=MESSAGES[result['reasons'][0]])
+        return response
+
+    @staticmethod
+    def _mixed_decision(response, order, context, approval, saved_approval):
+        """Only explicit, unchanged item allocation can waive mixed-cart checks."""
+        def reject_allocation():
+            result = response['result']
+            if 'provider_review_required' not in result['reasons']:
+                result['reasons'].append('provider_review_required')
+            result.update(state='blocked', code=result['reasons'][0],
+                          message=MESSAGES[result['reasons'][0]])
+            response['source'] = 'shopline_api_observation'
+            return response
+
+        if not approval or not context:
+            return reject_allocation()
+        result, facts = response['result'], response['result']['facts']
+        allocation = order.get('repairAllocation')
+        if (order.get('productValid') is not False
+                or order.get('reviewReasons') != ['mixed_cart', 'order_total_mismatch']
+                or not _valid_repair_allocation(allocation, order.get('total'), context['quote'].get('total'))):
+            return reject_allocation()
+        if saved_approval:
+            try:
+                saved = json.loads(saved_approval['facts'])
+            except (ValueError, TypeError):
+                return reject_allocation()
+            if (type(saved) is not dict or saved.get('manualMixedAllocation') is not True
+                    or saved.get('repairAllocation') != allocation
+                    or saved.get('repairAllocatedAmount') != allocation['repairAmount']
+                    or saved.get('orderTotal') != order.get('total')):
+                return reject_allocation()
+        name = normalize_name(context['case'].get('name'))
+        name_matches = bool(name) and name in [normalize_name(order.get(key))
+                                              for key in ('customerName', 'recipientName')]
+        if not name_matches and 'name_mismatch' not in result['reasons']:
+            result['reasons'].append('name_mismatch')
+        result['reasons'] = [reason for reason in result['reasons']
+                             if reason not in ('invalid_product', 'provider_review_required', 'amount_mismatch')]
+        facts.update(manualMixedAllocation=True, repairAllocatedAmount=allocation['repairAmount'],
+                     repairAllocation=dict(allocation), repairAmountMatches=True,
+                     allocationCustomerNameMatches=name_matches, manualApprovalActor=approval['actor'])
+        if not result['reasons']:
+            result.update(state='matched_internal_only', code='matched_internal_only',
+                          message=MESSAGES['matched_internal_only'])
+            response['source'] = 'shopline_api_completed'
+        else:
+            result.update(code=result['reasons'][0], message=MESSAGES[result['reasons'][0]])
         return response
 
     @staticmethod
@@ -352,7 +420,9 @@ class RealOrderReconciliation:
 
     @staticmethod
     def _fingerprint(order, wrapper, provenance):
-        scoped_order = {key: order.get(key) for key in _ORDER_FIELDS} if type(order) is dict else None
+        scoped_order = ({key: order.get(key) for key in _ORDER_FIELDS
+                         if key != 'repairAllocation' or key in order}
+                        if type(order) is dict else None)
         try:
             payload = _dump({'order': scoped_order, 'quote': wrapper,
                              'provenance': provenance})
@@ -384,6 +454,16 @@ class RealOrderReconciliation:
         return self.record(order, quote_wrapper, request_id, provenance=provenance,
                            _manual={'actor': actor.strip(), 'reason': reason.strip()})
 
+    def record_manual_mixed(self, order, quote_wrapper, request_id, *, provenance, confirm, reason, actor):
+        if confirm is not True:
+            raise ValueError('混購配對必須明確確認維修品項與分攤金額')
+        if not _text(reason, 500) or len(reason.strip()) < 5:
+            raise ValueError('請填寫至少 5 字的混購配對原因')
+        if not _text(actor, 100) or not actor.strip():
+            raise ValueError('混購配對必須記錄已登入的客服人員')
+        return self.record(order, quote_wrapper, request_id, provenance=provenance,
+                           _manual={'actor': actor.strip(), 'reason': reason.strip(), 'kind': 'mixed'})
+
     def record(self, order, quote_wrapper, request_id, *, provenance, _manual=None):
         _request_id(request_id)
         fingerprint = self._fingerprint(order, quote_wrapper,
@@ -404,10 +484,17 @@ class RealOrderReconciliation:
             saved_approval = c.execute('''SELECT * FROM wb_real_manual_approvals
                 WHERE quote_id=? AND order_id=? AND order_number=?''', (quote_id, identity, number)).fetchone()
             approval = _manual or (dict(saved_approval) if saved_approval else None)
-            if _manual and (not context or not _missing_remark_exception(order.get('orderRemarks'), context['case'])):
+            try:
+                saved_facts = json.loads(saved_approval['facts']) if saved_approval else {}
+            except (ValueError, TypeError):
+                saved_facts = {}
+            mixed = bool((_manual and _manual.get('kind') == 'mixed')
+                         or (type(saved_facts) is dict and saved_facts.get('manualMixedAllocation') is True))
+            if _manual and _manual.get('kind') != 'mixed' and (not context or not _missing_remark_exception(order.get('orderRemarks'), context['case'])):
                 # This path exists solely for omitted labels, not generic override.
                 raise ValueError('人工配對只適用漏填備註；已填資料衝突或備註完整時請使用一般核對')
-            response = self._manual_decision(response, order, context, approval)
+            response = (self._mixed_decision(response, order, context, approval, saved_approval)
+                        if mixed else self._manual_decision(response, order, context, approval))
             if response['result']['state'] == 'matched_internal_only':
                 prior_order = c.execute("SELECT quote_id,order_id,order_number FROM wb_real_order_checks WHERE outcome='matched_internal_only' AND (order_id=? OR order_number=?)", (identity, number)).fetchone()
                 prior_quote = c.execute("SELECT order_id,order_number FROM wb_real_order_checks WHERE outcome='matched_internal_only' AND quote_id=?", (quote_id,)).fetchone()
@@ -430,13 +517,14 @@ class RealOrderReconciliation:
                 number, quote_id, case_id, context['quote']['version'] if context else 0,
                 response['result']['state'], _dump(response), now))
             if (_manual and response['result']['state'] == 'matched_internal_only'
-                    and response['result']['facts'].get('manualRemarkException') is True):
+                    and (response['result']['facts'].get('manualRemarkException') is True
+                         or response['result']['facts'].get('manualMixedAllocation') is True)):
                 c.execute('''INSERT INTO wb_real_manual_approvals(quote_id,case_id,order_id,
                     order_number,check_id,actor,reason,facts,created_at) VALUES(?,?,?,?,?,?,?,?,?)''',
                     (quote_id, case_id, identity, number, check_id, _manual['actor'],
                      _manual['reason'], _dump(response['result']['facts']), now))
                 c.execute('INSERT INTO wb_audit(case_id,action,detail,created_at) VALUES(?,?,?,?)',
-                    (case_id, 'real_order_manual_approved', _dump({'actor': _manual['actor'],
+                    (case_id, 'real_order_manual_mixed_approved' if mixed else 'real_order_manual_approved', _dump({'actor': _manual['actor'],
                      'reason': _manual['reason'], 'orderNumber': number, 'checkId': check_id}), now))
             bound = c.execute("SELECT 1 FROM wb_real_order_checks WHERE quote_id=? AND order_id=? AND order_number=? AND outcome='matched_internal_only'",
                               (quote_id, identity, number)).fetchone()

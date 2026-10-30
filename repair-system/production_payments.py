@@ -370,18 +370,19 @@ class ProductionPayments:
         self.wake()
         return row
 
-    def reconcile(self, quote_id, payload, actor='系統', manual=False):
-        expected = {'orderNumber', 'requestId', 'confirm', 'reason'} if manual else {'orderNumber', 'requestId'}
+    def reconcile(self, quote_id, payload, actor='系統', manual=False, mixed=False):
+        expected = {'orderNumber', 'requestId', 'confirm', 'reason'} if manual or mixed else {'orderNumber', 'requestId'}
         if type(payload) is not dict or set(payload) != expected:
             raise ValueError('訂單核對欄位不正確')
         _uuid(payload['requestId'])
         wrapper = self.wrapper(quote_id)
         order = self.provider.exact(payload['orderNumber'])
         provenance = {'freshProviderLookup': True, 'readOnly': True}
-        if manual:
+        if manual or mixed:
             if not isinstance(payload.get('reason'), str) or len(payload['reason'].strip()) < 8:
                 raise ValueError('人工核實理由至少 8 字')
-            result = self.reconciliation.record_manual(order, wrapper, payload['requestId'],
+            recorder = self.reconciliation.record_manual_mixed if mixed else self.reconciliation.record_manual
+            result = recorder(order, wrapper, payload['requestId'],
                 provenance=provenance, confirm=payload['confirm'], reason=payload['reason'], actor=actor)
         else:
             result = self.reconciliation.record(order, wrapper, payload['requestId'], provenance=provenance)
@@ -795,10 +796,11 @@ class ProductionPayments:
                     self._queue_message('quote', result['quote'])
                 self.after_payment(result['quote']['id'])
                 handler.send(200, {'mode': 'production', 'case': self.detail(match[1])})
-            elif match := re.fullmatch(r'/api/payments/quotes/(WQ-[0-9a-f-]{36})/(reconcile|manual-match|refund-refresh|refund-close)', path):
+            elif match := re.fullmatch(r'/api/payments/quotes/(WQ-[0-9a-f-]{36})/(reconcile|manual-match|manual-mixed-match|refund-refresh|refund-close)', path):
                 quote_id, action = match.groups()
-                if action in ('reconcile', 'manual-match'):
-                    result = self.reconcile(quote_id, payload, user.get('displayName') or '管理員', action == 'manual-match')
+                if action in ('reconcile', 'manual-match', 'manual-mixed-match'):
+                    result = self.reconcile(quote_id, payload, user.get('displayName') or '管理員',
+                        action == 'manual-match', action == 'manual-mixed-match')
                 else:
                     expected = {'requestId', 'reason', 'confirm'} if action == 'refund-close' else {'requestId'}
                     if type(payload) is not dict or set(payload) != expected:

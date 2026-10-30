@@ -9,6 +9,7 @@ Money: https://open-api.docs.shoplineapp.com/docs/money (TWD cents are dollars).
 """
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import re
@@ -155,6 +156,59 @@ def _items(payload, page):
     return payload['items']
 
 
+def _mixed_repair_allocation(order, lines, total, payment_total):
+    """Evidence for explicit staff allocation only; never makes a cart auto-valid.
+
+    Initially support undiscounted product-only carts whose item amounts exactly
+    explain the entire paid order. Ambiguous credits/fees/discounts fail closed.
+    """
+    if (not 2 <= len(lines) <= 100 or type(total) is not int or total <= 0
+            or payment_total != total or _money(order.get('subtotal')) != total):
+        return None
+    if any(_money(order.get(key)) != 0 for key in
+           ('order_discount', 'user_credit', 'total_tax_fee')):
+        return None
+    if order.get('custom_discount_items') != []:
+        return None
+    promotions = order.get('promotion_items')
+    if (type(promotions) is not list or any(type(p) is not dict
+            or _money(p.get('discounted_amount')) != 0 for p in promotions)):
+        return None
+    evidence, repair = [], None
+    for line in lines:
+        if type(line) is not dict or line.get('item_type') != 'Product':
+            return None
+        ident, qty = line.get('item_id'), line.get('quantity')
+        price, gross, net = (_money(line.get(k)) for k in
+                             ('item_price', 'total', 'discounted_total'))
+        if (type(ident) is not str or not _OBJECT_ID.fullmatch(ident)
+                or type(qty) is not int or not 1 <= qty <= _MAX_AMOUNT
+                or price is None or price <= 0 or gross != qty * price or net != gross
+                or any(line.get(k) is not None and _money(line[k]) != price
+                       for k in ('order_discounted_price', 'discounted_price'))):
+            return None
+        item = {'productId': ident.lower(), 'quantity': qty, 'unitPrice': price,
+                'gross': gross, 'net': net}
+        evidence.append(item)
+        if ident.lower() == PRODUCT_ID:
+            if repair is not None or price != 1:
+                return None
+            repair = item
+    if repair is None or sum(item['net'] for item in evidence) != total:
+        return None
+    other = total - repair['net']
+    if other <= 0:
+        return None
+    canonical = {'lines': sorted(evidence, key=lambda item: json.dumps(item, sort_keys=True)),
+                 'orderTotal': total, 'paymentTotal': payment_total}
+    return {'schema': 'repair-allocation-v1', 'productId': PRODUCT_ID,
+            'quantity': repair['quantity'], 'unitPrice': 1,
+            'repairAmount': repair['net'], 'otherAmount': other,
+            'orderTotal': total, 'paymentTotal': payment_total,
+            'fingerprint': hashlib.sha256(json.dumps(canonical, sort_keys=True,
+                separators=(',', ':')).encode('utf-8')).hexdigest()}
+
+
 def _normalize(order, order_number, token):
     # Scope before touching customer fields, regardless of provider filtering.
     lines = order.get('subtotal_items')
@@ -249,6 +303,10 @@ def _normalize(order, order_number, token):
         'verificationStatus': 'not_verified',
         'reviewReasons': product_reasons + reasons,
     }
+    if set(product_reasons) == {'mixed_cart', 'order_total_mismatch'}:
+        allocation = _mixed_repair_allocation(order, lines, total, _money(payment.get('total')))
+        if allocation is not None:
+            normalized['repairAllocation'] = allocation
     # Protect against a compromised provider reflecting the bearer credential
     # into an otherwise allowed text field. Raw payloads are never returned.
     if token in json.dumps(normalized, ensure_ascii=False):

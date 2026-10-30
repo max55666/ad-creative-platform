@@ -13,6 +13,8 @@ import re
 import sqlite3
 import uuid
 
+from service_desk_reconciliation import _valid_repair_allocation
+
 
 HEADERS = ['案件編號', '申請人', '付款狀態', '維修費', '派車回收費', '應付合計',
            '已付金額', '付款訂單編號', '付款完成時間', '最近核對時間', '報價版本', '同步版本']
@@ -148,31 +150,45 @@ class PaymentSheetSync:
                     and facts.get('currentQuote') is True):
                 continue
             approval = None
-            if facts.get('manualRemarkException') is True:
+            if facts.get('manualRemarkException') is True or facts.get('manualMixedAllocation') is True:
                 table = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_real_manual_approvals'").fetchone()
                 if table:
                     approval = c.execute('''SELECT * FROM wb_real_manual_approvals
                         WHERE quote_id=? AND case_id=? AND order_id=? AND order_number=?''',
                         (quote['id'], case_id, row['order_id'], row['order_number'])).fetchone()
+            approved_facts = _object(approval['facts']) if approval else {}
+            mixed_approval = bool(approval and approved_facts.get('manualMixedAllocation') is True
+                and facts.get('manualMixedAllocation') is True
+                and approved_facts.get('repairAllocation') == facts.get('repairAllocation')
+                and approved_facts.get('repairAllocatedAmount') == facts.get('repairAllocatedAmount')
+                and approved_facts.get('orderTotal') == facts.get('orderTotal'))
             checked.append({'row': row, 'response': response, 'result': result, 'facts': facts,
-                            'manualApproval': approval is not None})
+                            'manualApproval': approval is not None, 'mixedApproval': mixed_approval})
         return checked
 
     @staticmethod
     def _success(check, due):
         response, result, facts, row = (check[k] for k in ('response', 'result', 'facts', 'row'))
+        ordinary_amount = (facts.get('manualMixedAllocation') is not True
+            and type(facts.get('orderTotal')) is int and facts['orderTotal'] == due
+            and facts.get('productValid') is True and facts.get('amountMatches') is True)
+        mixed_amount = (facts.get('manualMixedAllocation') is True and check.get('mixedApproval') is True
+            and facts.get('productValid') is False and facts.get('amountMatches') is False
+            and facts.get('repairAmountMatches') is True and facts.get('allocationCustomerNameMatches') is True
+            and facts.get('remarkCaseMatches') is True and facts.get('remarkNameMatches') is True
+            and type(facts.get('repairAllocatedAmount')) is int and facts['repairAllocatedAmount'] == due
+            and _valid_repair_allocation(facts.get('repairAllocation'), facts.get('orderTotal'), due))
         return (response.get('source') == 'shopline_api_completed'
                 and result.get('state') == row['outcome']
                 and ((result.get('state') == 'matched_internal_only' and result.get('code') == 'matched_internal_only')
                      or (result.get('state') == 'duplicate' and result.get('code') == 'already_matched_internal_only'))
                 and result.get('reasons') == []
                 and facts.get('providerPaymentStatus') == 'completed'
-                and type(facts.get('orderTotal')) is int and facts['orderTotal'] == due
+                and (ordinary_amount or mixed_amount)
                 and type(facts.get('quoteTotal')) is int and facts['quoteTotal'] == due
                 and facts.get('currency') == 'TWD'
                 and facts.get('caseSource') in ('snapshot', 'test_intake')
-                and all(facts.get(field) is True for field in ('productValid', 'amountMatches',
-                    'contactPhoneMatches', 'orderCreatedAfterQuote'))
+                and all(facts.get(field) is True for field in ('contactPhoneMatches', 'orderCreatedAfterQuote'))
                 and ((facts.get('remarkCaseMatches') is True and facts.get('remarkNameMatches') is True)
                      or (facts.get('manualRemarkException') is True and check.get('manualApproval') is True))
                 and bool(re.fullmatch(r'[A-Za-z0-9_-]{1,64}', row['order_number'])))
