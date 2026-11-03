@@ -64,6 +64,7 @@ PICKUP_DISPATCH_LOCK = threading.Lock()
 SERVICE_STARTED = False
 SERVICE_LOCK = threading.Lock()
 PAYMENTS = None
+PAYMENT_REVIEW = None
 PAYMENT_WORKFLOW = 'payment-v1'
 PAYMENT_REQUIRED_STATUSES = frozenset(('待收件','已收件','檢測中','維修中','待寄回','已寄回','已結案'))
 DISPATCH_TEST_WARNING = '【系統驗收測試｜請勿實際派車】'
@@ -1069,6 +1070,12 @@ class Handler(BaseHTTPRequestHandler):
             if not u: return self.send(401,{'error':'請先登入'})
             if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
             return self.send(200,WORKFLOW.status())
+        if path=='/api/pickup-payment-review/status':
+            u=self.user()
+            if not u: return self.send(401,{'error':'請先登入'})
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            if PAYMENT_REVIEW is None: return self.send(503,{'error':'群組付款審核尚未啟用'})
+            return self.send(200,PAYMENT_REVIEW.status())
         if path=='/api/admin-connection-status':
             u=self.user()
             if not u: return self.send(401,{'error':'請先登入'})
@@ -1176,7 +1183,7 @@ class Handler(BaseHTTPRequestHandler):
             if not 0<size<=200000: return self.send(413,{'error':'資料大小錯誤'})
             raw=self.rfile.read(size)
             data=(json.loads(raw,object_pairs_hook=payment_json_object,parse_constant=payment_json_constant)
-                  if path.startswith('/api/payments/') else json.loads(raw))
+                  if path.startswith(('/api/payments/','/api/pickup-payment-review/')) else json.loads(raw))
         except Exception: return self.send(400,{'error':'資料格式錯誤'})
         if not isinstance(data,dict): return self.send(400,{'error':'資料格式錯誤'})
         if path=='/api/line-setup': return self.configure_line(data)
@@ -1293,6 +1300,18 @@ class Handler(BaseHTTPRequestHandler):
                     WORKFLOW.menu_push(data['requestId'])
             except ValueError: return self.send(400,{'error':'請確認群組連線及設定格式'})
             return self.send(200,{'ok':True,**WORKFLOW.status()})
+        if path in ('/api/pickup-payment-review/settings','/api/pickup-payment-review/scan'):
+            if not u['admin']: return self.send(403,{'error':'需要管理員權限'})
+            if PAYMENT_REVIEW is None: return self.send(503,{'error':'群組付款審核尚未啟用'})
+            try:
+                if path.endswith('/settings'):
+                    if set(data)!={'enabled','approvers','mode','hours'}: raise ValueError('invalid_setting')
+                    PAYMENT_REVIEW.configure(data['enabled'],approvers=data['approvers'],mode=data['mode'],hours=data['hours'])
+                else:
+                    if data: raise ValueError('invalid_request')
+                    PAYMENT_REVIEW.scan_now()
+            except ValueError: return self.send(400,{'error':'請確認群組連線、審核人員及巡檢設定'})
+            return self.send(200,{'ok':True,**PAYMENT_REVIEW.status()})
         if path=='/api/line-handshake':
             if DEMO or not MESSAGE_SECRET or not BOT_UID: return self.send(503,{'error':'官方 LINE 連線確認尚未設定'})
             case_id=data.get('caseId')
@@ -1422,6 +1441,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(source,dict): continue
             if source.get('type')=='group':
                 observe_pickup_group(event)
+                if PAYMENT_REVIEW is not None and PAYMENT_REVIEW.enqueue(event): continue
                 if not WORKFLOW.enqueue(event): enqueue_pickup_dispatch(event)
                 continue
             if not isinstance(message,dict): continue
@@ -1546,7 +1566,7 @@ WORKFLOW = DispatchWorkflow(globals())
 
 def start_service():
     """Initialize once per Python process; imports never start network/worker IO."""
-    global SERVICE_STARTED,BOT_UID,PAYMENTS
+    global SERVICE_STARTED,BOT_UID,PAYMENTS,PAYMENT_REVIEW
     with SERVICE_LOCK:
         if SERVICE_STARTED: return
         validate_service_config()
@@ -1555,6 +1575,11 @@ def start_service():
             except (ValueError,KeyError): raise ValueError('無法驗證客服 LINE 帳號，尚未開放服務。') from None
         from production_payments import start_payments
         PAYMENTS=start_payments(globals())
+        if PAYMENTS is not None:
+            from pickup_payment_review import PickupPaymentReview
+            PAYMENT_REVIEW=PickupPaymentReview(globals(),PAYMENTS)
+            PAYMENT_REVIEW.init()
+            PAYMENT_REVIEW.start()
         start_cloud_worker()
         WORKFLOW.start()
         SERVICE_STARTED=True

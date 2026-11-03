@@ -5,7 +5,7 @@ alone reads real repair ownership and controls production release. No test DB,
 test identity, demo endpoint, synthetic order or provider write is imported.
 """
 import atexit
-from contextlib import contextmanager, closing
+from contextlib import contextmanager, closing, nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -370,7 +370,7 @@ class ProductionPayments:
         self.wake()
         return row
 
-    def reconcile(self, quote_id, payload, actor='系統', manual=False, mixed=False):
+    def reconcile(self, quote_id, payload, actor='系統', manual=False, mixed=False, authorization_guard=None, authorization_lock=None):
         expected = {'orderNumber', 'requestId', 'confirm', 'reason'} if manual or mixed else {'orderNumber', 'requestId'}
         if type(payload) is not dict or set(payload) != expected:
             raise ValueError('訂單核對欄位不正確')
@@ -378,14 +378,17 @@ class ProductionPayments:
         wrapper = self.wrapper(quote_id)
         order = self.provider.exact(payload['orderNumber'])
         provenance = {'freshProviderLookup': True, 'readOnly': True}
-        if manual or mixed:
-            if not isinstance(payload.get('reason'), str) or len(payload['reason'].strip()) < 8:
-                raise ValueError('人工核實理由至少 8 字')
-            recorder = self.reconciliation.record_manual_mixed if mixed else self.reconciliation.record_manual
-            result = recorder(order, wrapper, payload['requestId'],
-                provenance=provenance, confirm=payload['confirm'], reason=payload['reason'], actor=actor)
-        else:
-            result = self.reconciliation.record(order, wrapper, payload['requestId'], provenance=provenance)
+        with authorization_lock if authorization_lock is not None else nullcontext():
+            if authorization_guard is not None and (not callable(authorization_guard) or authorization_guard(order, wrapper) is not True):
+                raise ValueError('審核權限或候選已變更，請重新確認')
+            if manual or mixed:
+                if not isinstance(payload.get('reason'), str) or len(payload['reason'].strip()) < 8:
+                    raise ValueError('人工核實理由至少 8 字')
+                recorder = self.reconciliation.record_manual_mixed if mixed else self.reconciliation.record_manual
+                result = recorder(order, wrapper, payload['requestId'],
+                    provenance=provenance, confirm=payload['confirm'], reason=payload['reason'], actor=actor)
+            else:
+                result = self.reconciliation.record(order, wrapper, payload['requestId'], provenance=provenance)
         self.after_payment(quote_id)
         return {'mode': 'production', 'result': result['result'], 'payment': self.detail(wrapper['case']['caseNumber'])['payment']}
 
