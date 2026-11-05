@@ -200,6 +200,7 @@ class RealOrderReconciliation:
                           ' ON wb_real_order_checks(' + field +
                           ") WHERE outcome='matched_internal_only'")
             c.execute('CREATE INDEX IF NOT EXISTS wb_real_quote_checks ON wb_real_order_checks(quote_id,created_at)')
+            c.execute('CREATE INDEX IF NOT EXISTS wb_real_projection_checks ON wb_real_order_checks(case_id,quote_id,quote_version)')
             c.execute('''CREATE TABLE IF NOT EXISTS wb_real_manual_approvals (
                 quote_id TEXT PRIMARY KEY, case_id TEXT NOT NULL,
                 order_id TEXT NOT NULL UNIQUE, order_number TEXT NOT NULL UNIQUE,

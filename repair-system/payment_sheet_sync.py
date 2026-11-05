@@ -126,14 +126,16 @@ class PaymentSheetSync:
         return dict(FLAGS)
 
     @staticmethod
-    def _checks(c, case_id, quote):
+    def _checks(c, case_id, quote, due=None):
         exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_real_order_checks'").fetchone()
         if not exists or quote is None:
             return []
         records = c.execute('''SELECT rowid AS sequence,* FROM wb_real_order_checks
             WHERE case_id=? AND quote_id=? AND quote_version=? ORDER BY rowid DESC''',
-            (case_id, quote['id'], quote['version'])).fetchall()
+            (case_id, quote['id'], quote['version']))
         checked = []
+        approvals = {}
+        has_approvals = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_real_manual_approvals'").fetchone()
         for row in records:
             response = _object(row['response'])
             result = response.get('result', {})
@@ -151,11 +153,12 @@ class PaymentSheetSync:
                 continue
             approval = None
             if facts.get('manualRemarkException') is True or facts.get('manualMixedAllocation') is True:
-                table = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wb_real_manual_approvals'").fetchone()
-                if table:
-                    approval = c.execute('''SELECT * FROM wb_real_manual_approvals
+                key = (row['order_id'], row['order_number'])
+                if has_approvals and key not in approvals:
+                    approvals[key] = c.execute('''SELECT * FROM wb_real_manual_approvals
                         WHERE quote_id=? AND case_id=? AND order_id=? AND order_number=?''',
                         (quote['id'], case_id, row['order_id'], row['order_number'])).fetchone()
+                approval = approvals.get(key)
             approved_facts = _object(approval['facts']) if approval else {}
             mixed_approval = bool(approval and approved_facts.get('manualMixedAllocation') is True
                 and facts.get('manualMixedAllocation') is True
@@ -164,6 +167,12 @@ class PaymentSheetSync:
                 and approved_facts.get('orderTotal') == facts.get('orderTotal'))
             checked.append({'row': row, 'response': response, 'result': result, 'facts': facts,
                             'manualApproval': approval is not None, 'mixedApproval': mixed_approval})
+            # Projection only needs the newest valid observation, the newest
+            # successful match, and the newest observation of that same order.
+            # All three are in this prefix; a later refund in the prefix still
+            # overrides the older success. Never truncate by an arbitrary count.
+            if due == 0 or due is not None and PaymentSheetSync._success(checked[-1], due):
+                break
         return checked
 
     @staticmethod
@@ -213,7 +222,7 @@ class PaymentSheetSync:
                     or values.get('caseNumber') != number or values.get('name') != name):
                 raise ValueError('目前報價內容不完整，無法同步付款狀態')
             fees, quote_version, status = (fee, pickup, due), quote['version'], '免付款' if due == 0 else '待付款'
-            checks = self._checks(c, row['id'], quote)
+            checks = self._checks(c, row['id'], quote, due)
             if checks:
                 checked_at = _time(checks[0]['row']['created_at'])
             success = next((check for check in checks if self._success(check, due)), None) if due else None

@@ -8,6 +8,7 @@ import atexit
 from contextlib import contextmanager, closing, nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -89,6 +90,21 @@ def _fingerprint(case):
     return hashlib.sha256(_dump(_identity(case)).encode()).hexdigest()
 
 
+def _search_match(row, data, query):
+    if not query:
+        return True
+    if any(query in str(value or '').lower() for value in
+           (row['id'], data.get('name'), data.get('phone'), data.get('order'), data.get('model'))):
+        return True
+    digits = re.sub(r'[\s()+-]', '', query)
+    phone = re.sub(r'[\s()+-]', '', str(data.get('phone') or ''))
+    if digits.startswith('886'):
+        digits = '0' + digits[3:]
+    if phone.startswith('886'):
+        phone = '0' + phone[3:]
+    return bool(digits and digits.isascii() and digits.isdigit() and digits in phone)
+
+
 class ProviderBusy(ValueError):
     pass
 
@@ -136,6 +152,7 @@ class ProductionPayments:
         self.stop_event, self.wake_event = threading.Event(), threading.Event()
         self.cycle_lock, self.last_scan = threading.Lock(), 0.0
         self.last_error, self.thread = '', None
+        self._mixed_preview_key = secrets.token_bytes(32)
         self.provider = provider or ProductionOrderProvider(config['shoplineApiToken'])
         self.desk = ServiceDesk(self.connect, seed_examples=False)
         self.desk.init()
@@ -725,14 +742,85 @@ class ProductionPayments:
         selected = []
         for row in rows:
             data = _case_data(row)
-            if query and not any(query in str(value).lower() for value in
-                    (row['id'], data.get('name'), data.get('phone'), data.get('order'), data.get('model'))):
+            if not _search_match(row, data, query):
                 continue
             selected.append(self.detail(row['id']))
         return {'enabled': True, 'mode': 'production', 'newCasesEnabled': self.new_cases_enabled,
             'notificationsEnabled': self.setting('notifications_enabled'), 'cases': selected,
             'automation': {'lastScanAt': datetime.fromtimestamp(self.last_scan, TAIPEI).isoformat() if self.last_scan else '',
                 'lastError': self.last_error}, 'sheetUrl': SHEET_URL, 'sheet': self.sheet.status()}
+
+    def list_state(self, query=''):
+        """Display-only summaries; actions always reload the canonical detail."""
+        query = str(query).strip().lower()[:100]
+        with self.s['connect']() as c:
+            rows = [dict(r) for r in c.execute('SELECT * FROM cases ORDER BY created DESC,id DESC LIMIT 1000')]
+        with self.connect() as c:
+            links = {r['real_id']: dict(r) for r in c.execute('''SELECT l.real_id,w.version,w.latest_quote_id,
+                q.status AS quote_status,s.record FROM wb_prod_links l
+                JOIN wb_cases w ON w.id=l.wb_id LEFT JOIN wb_quotes q ON q.id=w.latest_quote_id
+                LEFT JOIN wb_payment_sheet_state s ON s.case_id=l.wb_id''')}
+        selected = []
+        for row in rows:
+            data = _case_data(row)
+            if not _search_match(row, data, query):
+                continue
+            link = links.get(row['id'])
+            status = '待核價'
+            if link and link['latest_quote_id']:
+                saved = json.loads(link['record']) if link['record'] else {}
+                status = (saved.get('status', '狀態更新中') if saved.get('quoteVersion') == link['version']
+                          and link['quote_status'] == 'active' else '狀態更新中')
+            selected.append({'id': row['id'], 'name': data.get('name', ''), 'phone': data.get('phone', ''),
+                'model': data.get('model', ''), 'shipping': data.get('shipping', ''),
+                'managed': 'paymentWorkflow' in data, 'legacy': 'paymentWorkflow' not in data,
+                'payment': {'paymentStatus': status} if 'paymentWorkflow' in data else None})
+        return {'enabled': True, 'mode': 'production', 'newCasesEnabled': self.new_cases_enabled,
+            'cases': selected, 'automation': {'lastScanAt': datetime.fromtimestamp(self.last_scan, TAIPEI).isoformat() if self.last_scan else '',
+            'lastError': self.last_error}, 'sheetUrl': SHEET_URL}
+
+    def _mixed_token(self, order, wrapper, actor, expires):
+        payload = _dump({'order': order,
+            'quote': {k: wrapper['quote'].get(k) for k in ('id', 'caseId', 'version', 'status', 'paymentStatus', 'repairFee', 'pickupFee', 'total', 'currency', 'name', 'caseNumber', 'remarkText', 'createdAt', 'acceptedOrderId')},
+            'case': {k: wrapper['case'].get(k) for k in ('id', 'caseNumber', 'name', 'phone', 'address', 'model', 'pickup', 'version', 'source')},
+            'actor': actor, 'expires': expires})
+        return str(expires) + '.' + hmac.new(self._mixed_preview_key, payload.encode(), hashlib.sha256).hexdigest()
+
+    def mixed_preview(self, quote_id, payload, actor):
+        if type(payload) is not dict or set(payload) != {'orderNumber'} or not ORDER.fullmatch(str(payload['orderNumber'])):
+            raise ValueError('請填寫正確的付款訂單編號')
+        wrapper = self.wrapper(quote_id)
+        order = self.provider.exact(payload['orderNumber'])
+        with self.reconciliation._connection() as c:
+            context, error = self.reconciliation._context(c, wrapper)
+            response = self.reconciliation._decision(order, context, error, {'freshProviderLookup': True, 'readOnly': True})
+            response = self.reconciliation._mixed_decision(response, order, context, {'actor': actor}, None)
+            bound = c.execute("SELECT quote_id FROM wb_real_order_checks WHERE (order_id=? OR order_number=?) AND outcome='matched_internal_only' LIMIT 1",
+                              (order.get('id'), order.get('orderNumber'))).fetchone()
+        reasons = list(response['result']['reasons'])
+        if bound and bound['quote_id'] != quote_id:
+            reasons.append('order_already_bound')
+        eligible = response['result']['state'] == 'matched_internal_only' and not reasons
+        proof = order.get('repairAllocation') or {}
+        return {'mode': 'production', 'eligible': eligible, 'orderNumber': order.get('orderNumber'),
+            'repairAmount': proof.get('repairAmount') if type(proof) is dict else None,
+            'otherAmount': proof.get('otherAmount') if type(proof) is dict else None,
+            'orderTotal': order.get('total'), 'quoteTotal': wrapper['quote']['total'],
+            'reasons': [CHECK_REASONS.get(r, '訂單資料需要進一步確認。') for r in reasons],
+            'previewToken': self._mixed_token(order, wrapper, actor, int(time.time()) + 300) if eligible else ''}
+
+    def confirm_mixed(self, quote_id, payload, actor):
+        if type(payload) is not dict or set(payload) != {'orderNumber', 'requestId', 'confirm', 'reason', 'previewToken'}:
+            raise ValueError('混購核對欄位不正確')
+        token = payload['previewToken']
+        if not isinstance(token, str) or not re.fullmatch(r'[0-9]{10}\.[0-9a-f]{64}', token):
+            raise ValueError('請先重新預覽混購訂單')
+        expires = int(token.split('.')[0])
+        def guard(order, wrapper):
+            return (0 <= expires - time.time() <= 300
+                    and hmac.compare_digest(token, self._mixed_token(order, wrapper, actor, expires)))
+        return self.reconcile(quote_id, {k: v for k, v in payload.items() if k != 'previewToken'},
+                              actor, mixed=True, authorization_guard=guard)
 
     def handle_get(self, handler, path, query):
         if path != '/admin/payments' and not path.startswith('/api/payments/'):
@@ -751,9 +839,10 @@ class ProductionPayments:
             handler.send(401, {'error': '請先登入管理員'})
             return True
         try:
-            if path == '/api/payments/state':
+            if path in ('/api/payments/state', '/api/payments/list'):
                 query = parse_qs(query) if isinstance(query, str) else query
-                handler.send(200, self.state(query.get('q', [''])[0]))
+                reader = self.list_state if path.endswith('/list') else self.state
+                handler.send(200, reader(query.get('q', [''])[0]))
             elif match := re.fullmatch(r'/api/payments/cases/(R[0-9]{8}-[0-9]{4,8})', path):
                 handler.send(200, {'mode': 'production', 'case': self.detail(match[1])})
             else:
@@ -799,9 +888,13 @@ class ProductionPayments:
                     self._queue_message('quote', result['quote'])
                 self.after_payment(result['quote']['id'])
                 handler.send(200, {'mode': 'production', 'case': self.detail(match[1])})
-            elif match := re.fullmatch(r'/api/payments/quotes/(WQ-[0-9a-f-]{36})/(reconcile|manual-match|manual-mixed-match|refund-refresh|refund-close)', path):
+            elif match := re.fullmatch(r'/api/payments/quotes/(WQ-[0-9a-f-]{36})/(reconcile|manual-match|manual-mixed-match|mixed-preview|mixed-confirm|refund-refresh|refund-close)', path):
                 quote_id, action = match.groups()
-                if action in ('reconcile', 'manual-match', 'manual-mixed-match'):
+                if action == 'mixed-preview':
+                    result = self.mixed_preview(quote_id, payload, user.get('id', 'admin'))
+                elif action == 'mixed-confirm':
+                    result = self.confirm_mixed(quote_id, payload, user.get('id', 'admin'))
+                elif action in ('reconcile', 'manual-match', 'manual-mixed-match'):
                     result = self.reconcile(quote_id, payload, user.get('displayName') or '管理員',
                         action == 'manual-match', action == 'manual-mixed-match')
                 else:
