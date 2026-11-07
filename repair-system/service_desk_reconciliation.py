@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+import unicodedata
 import uuid
 
 from order_matching import normalize_name, normalize_phone
@@ -137,6 +138,36 @@ def _missing_remark_exception(value, case):
                for label, value in values.items())
 
 
+def _reviewed_note_exception(value, case):
+    """Allow explicitly reviewed non-identity instructions, never identity overrides.
+
+    This separate opt-in is intentionally not used by automatic reconciliation
+    or the existing missing-label exception. Keep the whole reviewable note small
+    enough to display on the approval card without truncation.
+    """
+    if (type(value) is not str or not value.strip() or len(value) > 500
+            or type(case) is not dict or type(case.get('caseNumber')) is not str
+            or not _CASE_NUMBER.fullmatch(case['caseNumber'])
+            or not normalize_name(case.get('name', ''))):
+        return False
+    visible = value.replace('\r\n', '\n')
+    if any(unicodedata.category(ch).startswith('C') and ch != '\n' for ch in visible):
+        return False
+    normalized = unicodedata.normalize('NFKC', visible).casefold()
+    # Identity-bearing notes require the existing exact/missing-label paths or
+    # backend investigation. Even a matching identity is not interpreted here.
+    if re.search(r'(?:送修|維修|案件)\s*(?:編號|單號|號碼)|申請人|姓名|聯絡人|收件人|訂購人|'
+                 r'客戶名稱|客戶姓名|電話|手機|身分|身份|'
+                 r'\b(?:applicant|customer|recipient|name|phone|mobile|case\s*(?:id|no|number))\b|'
+                 r'(?<![a-z0-9])r\s*[-:#]?\s*\d{4,}', normalized):
+        return False
+    return True
+
+
+def _reviewed_note_hash(value):
+    return hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+
 def _valid_repair_allocation(value, order_total, repair_amount):
     """Validate the server-normalized allocation without rewriting order money."""
     keys = {'schema', 'productId', 'quantity', 'unitPrice', 'repairAmount',
@@ -231,6 +262,49 @@ class RealOrderReconciliation:
                 response['source'] = 'shopline_api_completed'
             else:
                 result.update(code=result['reasons'][0], message=MESSAGES[result['reasons'][0]])
+        return response
+
+    @staticmethod
+    def _note_decision(response, order, context, approval, saved_approval):
+        """Waive only absent identity labels after explicit review of this note."""
+        if not approval or not context:
+            return response
+        result, facts = response['result'], response['result']['facts']
+        note = order.get('orderRemarks')
+        valid = _reviewed_note_exception(note, context['case'])
+        note_hash = _reviewed_note_hash(note) if valid else ''
+        if saved_approval:
+            try:
+                saved = json.loads(saved_approval['facts'])
+            except (ValueError, TypeError):
+                saved = {}
+            valid = bool(valid and type(saved) is dict
+                         and saved.get('manualNoteException') is True
+                         and saved.get('manualNoteHash') == note_hash)
+        name = normalize_name(context['case'].get('name'))
+        name_matches = bool(name) and name in [normalize_name(order.get(key))
+                                              for key in ('customerName', 'recipientName')]
+        if not valid:
+            # A changed note cannot silently reuse an earlier approval, even
+            # when it was changed into an automatically valid exact remark.
+            if 'conflicting_remark' not in result['reasons']:
+                result['reasons'].append('conflicting_remark')
+        else:
+            result['reasons'] = [reason for reason in result['reasons']
+                                 if reason not in ('missing_remark', 'conflicting_remark')]
+            facts.update(manualNoteException=True, manualNoteHash=note_hash,
+                         manualNoteCustomerNameMatches=name_matches,
+                         manualApprovalActor=approval['actor'])
+        if not name_matches and 'name_mismatch' not in result['reasons']:
+            result['reasons'].append('name_mismatch')
+        if not result['reasons']:
+            result.update(state='matched_internal_only', code='matched_internal_only',
+                          message=MESSAGES['matched_internal_only'])
+            response['source'] = 'shopline_api_completed'
+        else:
+            result.update(state='blocked', code=result['reasons'][0],
+                          message=MESSAGES[result['reasons'][0]])
+            response['source'] = 'shopline_api_observation'
         return response
 
     @staticmethod
@@ -465,6 +539,16 @@ class RealOrderReconciliation:
         return self.record(order, quote_wrapper, request_id, provenance=provenance,
                            _manual={'actor': actor.strip(), 'reason': reason.strip(), 'kind': 'mixed'})
 
+    def record_manual_note(self, order, quote_wrapper, request_id, *, provenance, confirm, reason, actor):
+        if confirm is not True:
+            raise ValueError('備註審核配對必須明確確認訂單、付款及備註內容')
+        if not _text(reason, 500) or len(reason.strip()) < 5:
+            raise ValueError('請填寫至少 5 字的備註審核原因')
+        if not _text(actor, 100) or not actor.strip():
+            raise ValueError('備註審核配對必須記錄已登入的審核人員')
+        return self.record(order, quote_wrapper, request_id, provenance=provenance,
+                           _manual={'actor': actor.strip(), 'reason': reason.strip(), 'kind': 'note'})
+
     def record(self, order, quote_wrapper, request_id, *, provenance, _manual=None):
         _request_id(request_id)
         fingerprint = self._fingerprint(order, quote_wrapper,
@@ -491,11 +575,16 @@ class RealOrderReconciliation:
                 saved_facts = {}
             mixed = bool((_manual and _manual.get('kind') == 'mixed')
                          or (type(saved_facts) is dict and saved_facts.get('manualMixedAllocation') is True))
-            if _manual and _manual.get('kind') != 'mixed' and (not context or not _missing_remark_exception(order.get('orderRemarks'), context['case'])):
+            note_review = bool((_manual and _manual.get('kind') == 'note')
+                               or (type(saved_facts) is dict and saved_facts.get('manualNoteException') is True))
+            if _manual and _manual.get('kind') == 'note' and (not context or not _reviewed_note_exception(order.get('orderRemarks'), context['case'])):
+                raise ValueError('備註含身分資料、衝突或不適合群組審核，請至付款後台核實')
+            if _manual and _manual.get('kind') not in ('mixed', 'note') and (not context or not _missing_remark_exception(order.get('orderRemarks'), context['case'])):
                 # This path exists solely for omitted labels, not generic override.
                 raise ValueError('人工配對只適用漏填備註；已填資料衝突或備註完整時請使用一般核對')
             response = (self._mixed_decision(response, order, context, approval, saved_approval)
-                        if mixed else self._manual_decision(response, order, context, approval))
+                        if mixed else self._note_decision(response, order, context, approval, saved_approval)
+                        if note_review else self._manual_decision(response, order, context, approval))
             if response['result']['state'] == 'matched_internal_only':
                 prior_order = c.execute("SELECT quote_id,order_id,order_number FROM wb_real_order_checks WHERE outcome='matched_internal_only' AND (order_id=? OR order_number=?)", (identity, number)).fetchone()
                 prior_quote = c.execute("SELECT order_id,order_number FROM wb_real_order_checks WHERE outcome='matched_internal_only' AND quote_id=?", (quote_id,)).fetchone()
@@ -519,13 +608,14 @@ class RealOrderReconciliation:
                 response['result']['state'], _dump(response), now))
             if (_manual and response['result']['state'] == 'matched_internal_only'
                     and (response['result']['facts'].get('manualRemarkException') is True
+                         or response['result']['facts'].get('manualNoteException') is True
                          or response['result']['facts'].get('manualMixedAllocation') is True)):
                 c.execute('''INSERT INTO wb_real_manual_approvals(quote_id,case_id,order_id,
                     order_number,check_id,actor,reason,facts,created_at) VALUES(?,?,?,?,?,?,?,?,?)''',
                     (quote_id, case_id, identity, number, check_id, _manual['actor'],
                      _manual['reason'], _dump(response['result']['facts']), now))
                 c.execute('INSERT INTO wb_audit(case_id,action,detail,created_at) VALUES(?,?,?,?)',
-                    (case_id, 'real_order_manual_mixed_approved' if mixed else 'real_order_manual_approved', _dump({'actor': _manual['actor'],
+                    (case_id, 'real_order_manual_mixed_approved' if mixed else 'real_order_manual_note_approved' if note_review else 'real_order_manual_approved', _dump({'actor': _manual['actor'],
                      'reason': _manual['reason'], 'orderNumber': number, 'checkId': check_id}), now))
             bound = c.execute("SELECT 1 FROM wb_real_order_checks WHERE quote_id=? AND order_id=? AND order_number=? AND outcome='matched_internal_only'",
                               (quote_id, identity, number)).fetchone()

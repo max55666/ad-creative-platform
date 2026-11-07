@@ -60,14 +60,14 @@ class Payments:
     def detail(self, ident):
         return deepcopy(next(c for c in self.cases if c['id'] == ident))
 
-    def reconcile(self, quote_id, payload, actor, manual=False, authorization_guard=None, authorization_lock=None):
+    def reconcile(self, quote_id, payload, actor, manual=False, authorization_guard=None, authorization_lock=None, reviewed_note=False):
         case = self.cases[0]
         order = deepcopy(self.provider.orders[0])
         if self.before_guard:
             self.before_guard(order)
         if not authorization_guard(order, {'quote': case['quote']}):
             raise ValueError('guard_rejected')
-        self.calls.append({'quote': quote_id, 'payload': payload, 'actor': actor, 'manual': manual})
+        self.calls.append({'quote': quote_id, 'payload': payload, 'actor': actor, 'manual': manual, 'reviewed_note': reviewed_note})
         case['quote']['acceptedOrderId'] = order['id']
         case['quote']['paymentStatus'] = 'paid'
         case['payment'].update(paymentStatus='已付款', amountPaid=case['quote']['total'], paymentOrderNumber=order['orderNumber'])
@@ -182,6 +182,46 @@ class ReviewTests(unittest.TestCase):
         self.scan()
         self.r.push_once()
         self.assertEqual(len(self.sent), 1)
+
+    def test_free_text_note_has_explicit_approval_and_whole_note(self):
+        self.order['orderRemarks'] = '取件地址：捷比達公司'
+        job = self.scan()
+        item = json.loads(job['payload'])
+        self.assertTrue(item['approveSafe'])
+        self.assertTrue(item['reviewedNoteRequired'])
+        self.assertFalse(item['manualRequired'])
+        self.assertEqual(self.payment.calls, [])
+        self.r.push_once()
+        card = self.sent[0][1][0]['contents']
+        self.assertEqual([b['action']['label'] for b in card['footer']['contents']], ['同意派車', '不同意派車'])
+        self.assertIn(self.order['orderRemarks'], json.dumps(card, ensure_ascii=False))
+        self.r.enqueue(self.event(job))
+        self.r.approval_once()
+        self.now += 4
+        self.r.approval_once()
+        self.assertEqual(len(self.payment.calls), 1)
+        self.assertTrue(self.payment.calls[0]['reviewed_note'])
+        self.assertEqual(self.state(job)['state'], 'syncing')
+        self.ready()
+        self.r.approval_once()
+        self.assertEqual(self.state(job)['state'], 'completed')
+
+    def test_free_text_note_still_requires_designated_approver(self):
+        self.order['orderRemarks'] = '取件地址：捷比達公司'
+        job = self.scan()
+        self.r.enqueue(self.event(job, user=OTHER))
+        self.r.approval_once()
+        self.assertEqual(self.state(job)['state'], 'pending')
+        self.assertEqual(self.payment.calls, [])
+
+    def test_note_changed_after_approval_is_blocked(self):
+        self.order['orderRemarks'] = '取件地址：捷比達公司'
+        job = self.scan()
+        self.r.enqueue(self.event(job))
+        self.order['orderRemarks'] = '更換取件地點'
+        self.r.approval_once()
+        self.assertEqual(self.state(job)['state'], 'blocked')
+        self.assertEqual(self.payment.calls, [])
 
     def test_reject_never_reconciles_and_does_not_repeat_next_night(self):
         job = self.scan()

@@ -387,8 +387,10 @@ class ProductionPayments:
         self.wake()
         return row
 
-    def reconcile(self, quote_id, payload, actor='系統', manual=False, mixed=False, authorization_guard=None, authorization_lock=None):
-        expected = {'orderNumber', 'requestId', 'confirm', 'reason'} if manual or mixed else {'orderNumber', 'requestId'}
+    def reconcile(self, quote_id, payload, actor='系統', manual=False, mixed=False, authorization_guard=None, authorization_lock=None, *, reviewed_note=False):
+        if sum(bool(v) for v in (manual, mixed, reviewed_note)) > 1:
+            raise ValueError('人工核對方式不可重疊')
+        expected = {'orderNumber', 'requestId', 'confirm', 'reason'} if manual or mixed or reviewed_note else {'orderNumber', 'requestId'}
         if type(payload) is not dict or set(payload) != expected:
             raise ValueError('訂單核對欄位不正確')
         _uuid(payload['requestId'])
@@ -398,10 +400,11 @@ class ProductionPayments:
         with authorization_lock if authorization_lock is not None else nullcontext():
             if authorization_guard is not None and (not callable(authorization_guard) or authorization_guard(order, wrapper) is not True):
                 raise ValueError('審核權限或候選已變更，請重新確認')
-            if manual or mixed:
+            if manual or mixed or reviewed_note:
                 if not isinstance(payload.get('reason'), str) or len(payload['reason'].strip()) < 8:
                     raise ValueError('人工核實理由至少 8 字')
-                recorder = self.reconciliation.record_manual_mixed if mixed else self.reconciliation.record_manual
+                recorder = (self.reconciliation.record_manual_note if reviewed_note else
+                            self.reconciliation.record_manual_mixed if mixed else self.reconciliation.record_manual)
                 result = recorder(order, wrapper, payload['requestId'],
                     provenance=provenance, confirm=payload['confirm'], reason=payload['reason'], actor=actor)
             else:

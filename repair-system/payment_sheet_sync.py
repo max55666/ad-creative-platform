@@ -152,7 +152,8 @@ class PaymentSheetSync:
                     and facts.get('currentQuote') is True):
                 continue
             approval = None
-            if facts.get('manualRemarkException') is True or facts.get('manualMixedAllocation') is True:
+            if (facts.get('manualRemarkException') is True or facts.get('manualMixedAllocation') is True
+                    or facts.get('manualNoteException') is True):
                 key = (row['order_id'], row['order_number'])
                 if has_approvals and key not in approvals:
                     approvals[key] = c.execute('''SELECT * FROM wb_real_manual_approvals
@@ -160,13 +161,22 @@ class PaymentSheetSync:
                         (quote['id'], case_id, row['order_id'], row['order_number'])).fetchone()
                 approval = approvals.get(key)
             approved_facts = _object(approval['facts']) if approval else {}
+            remark_approval = bool(approval and approved_facts.get('manualRemarkException') is True)
             mixed_approval = bool(approval and approved_facts.get('manualMixedAllocation') is True
                 and facts.get('manualMixedAllocation') is True
                 and approved_facts.get('repairAllocation') == facts.get('repairAllocation')
                 and approved_facts.get('repairAllocatedAmount') == facts.get('repairAllocatedAmount')
                 and approved_facts.get('orderTotal') == facts.get('orderTotal'))
+            note_approval = bool(approval and approved_facts.get('manualNoteException') is True
+                and facts.get('manualNoteException') is True
+                and type(facts.get('manualNoteHash')) is str
+                and re.fullmatch(r'[0-9a-f]{64}', facts['manualNoteHash'])
+                and approved_facts.get('manualNoteHash') == facts['manualNoteHash']
+                and approved_facts.get('manualNoteCustomerNameMatches') is True
+                and facts.get('manualNoteCustomerNameMatches') is True)
             checked.append({'row': row, 'response': response, 'result': result, 'facts': facts,
-                            'manualApproval': approval is not None, 'mixedApproval': mixed_approval})
+                            'manualApproval': remark_approval, 'mixedApproval': mixed_approval,
+                            'noteApproval': note_approval})
             # Projection only needs the newest valid observation, the newest
             # successful match, and the newest observation of that same order.
             # All three are in this prefix; a later refund in the prefix still
@@ -199,7 +209,8 @@ class PaymentSheetSync:
                 and facts.get('caseSource') in ('snapshot', 'test_intake')
                 and all(facts.get(field) is True for field in ('contactPhoneMatches', 'orderCreatedAfterQuote'))
                 and ((facts.get('remarkCaseMatches') is True and facts.get('remarkNameMatches') is True)
-                     or (facts.get('manualRemarkException') is True and check.get('manualApproval') is True))
+                     or (facts.get('manualRemarkException') is True and check.get('manualApproval') is True)
+                     or (facts.get('manualNoteException') is True and check.get('noteApproval') is True))
                 and bool(re.fullmatch(r'[A-Za-z0-9_-]{1,64}', row['order_number'])))
 
     def _projection(self, c, row):

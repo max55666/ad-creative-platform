@@ -14,7 +14,7 @@ import time
 import uuid
 
 from order_matching import normalize_name, normalize_phone
-from service_desk_reconciliation import _missing_remark_exception, _remark
+from service_desk_reconciliation import _missing_remark_exception, _remark, _reviewed_note_exception
 
 TAIPEI = timezone(timedelta(hours=8))
 PICKUP = '由客服派遣物流回收'
@@ -98,12 +98,14 @@ def candidates(cases, repairs, orders):
             if any(v and v != name for v in remark_names):
                 warnings.append('備註姓名與申請人不同')
             manual = _missing_remark_exception(remark, {'caseNumber': case['id'], 'name': case['name']})
+            reviewed_note = (not manual and _reviewed_note_exception(
+                remark, {'caseNumber': case['id'], 'name': case['name']}))
             remark_case, remark_name, remark_error = _remark(remark)
             # Correctly annotated orders belong to the pre-existing automatic
             # reconciliation flow, not a group review whose rejection it ignores.
             automatic = bool(not manual and not remark_error and remark_case == case['id']
                              and remark_name == case['name'] and match_phone)
-            if not manual and (remark_error or remark_case != case['id'] or remark_name != case['name']):
+            if not manual and not reviewed_note and (remark_error or remark_case != case['id'] or remark_name != case['name']):
                 warnings.append('備註內容須至付款後台核實')
             row = {'caseNumber': case['id'], 'name': case['name'], 'model': case.get('model', ''),
                    'quoteId': quote['id'], 'quoteVersion': quote['version'], 'orderNumber': order['orderNumber'],
@@ -115,6 +117,10 @@ def candidates(cases, repairs, orders):
                    'orderHash': digest({k: order.get(k) for k in ('id', 'orderNumber', 'customerName', 'customerPhone',
                        'recipientName', 'recipientPhone', 'address', 'orderRemarks', 'currency', 'total', 'productValid',
                        'reportedPaymentStatus', 'reportedPaidAt', 'createdAt', 'reviewReasons', 'repairAllocation')})}
+            if reviewed_note:
+                # Keep the whole bounded note visible to the human approver and
+                # bind the approval to this exact note via the existing hashes.
+                row.update(reviewedNoteRequired=True, reviewNote=remark)
             found.append(row)
     by_case, by_order = Counter(r['caseNumber'] for r in found), Counter(r['orderNumber'] for r in found)
     for row in found:
@@ -137,6 +143,10 @@ def card(row, identifier):
              '下單備註：未填寫' if row['remarkEmpty'] else '下單備註：已有內容',
              'SHOPLINE 回報付款完成，待確認；尚未加入派車名單。']
     lines += row['warnings']
+    if row.get('reviewedNoteRequired'):
+        lines += ['訂單備註（請核實）：' + row['reviewNote'],
+                  '備註未依指定格式填寫；請確認此訂單屬於本案後，再按「同意派車」。',
+                  '取件地址以送修表單為準；如需變更，請先至後台修正。']
     buttons = []
     if row['approveSafe']:
         buttons.append(_postback('同意派車', 'ppr1:approve:' + identifier, '同意派車 ' + case))
@@ -438,9 +448,12 @@ class PickupPaymentReview:
                 payload = {'orderNumber': item['orderNumber'], 'requestId': job['request_id']}
                 if item['manualRequired']:
                     payload.update(confirm=True, reason='LINE 指定審核者確認姓名、電話及核定金額吻合，補救漏填送修備註。')
+                if item.get('reviewedNoteRequired'):
+                    payload.update(confirm=True, reason='LINE 指定審核者已閱讀原始訂單備註，確認姓名、電話與核定金額吻合且此訂單屬於本案。')
+                note_option = {'reviewed_note': True} if item.get('reviewedNoteRequired') else {}
                 result = self.p.reconcile(item['quoteId'], payload, actor='LINE 群組指定審核者',
                                           manual=item['manualRequired'], authorization_guard=lambda order, wrapper: self.guard(job, order, wrapper),
-                                          authorization_lock=self.s['PICKUP_NOTIFICATION_LOCK'])
+                                          authorization_lock=self.s['PICKUP_NOTIFICATION_LOCK'], **note_option)
                 if result.get('result', {}).get('state') not in ('matched_internal_only', 'duplicate'):
                     self.block(job, 'reconciliation_blocked', '最新付款核對未通過，請至付款後台確認；尚未完成派車同步。')
                     return True
