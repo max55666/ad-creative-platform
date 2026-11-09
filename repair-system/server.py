@@ -61,6 +61,7 @@ PICKUP_DISPATCH_PATTERN = re.compile(r'(R[0-9]{8}-[0-9]{4,})\s*已派車\Z')
 PICKUP_DISPATCH_VERIFIED_FINGERPRINT = ''
 PICKUP_DISPATCH_VERIFY_NEXT = 0
 PICKUP_DISPATCH_LOCK = threading.Lock()
+PICKUP_DISPATCH_PAYMENT_WAIT_SECONDS = 300
 SERVICE_STARTED = False
 SERVICE_LOCK = threading.Lock()
 PAYMENTS = None
@@ -167,6 +168,8 @@ def init_db():
             SELECT command_id,case_id,event_stamp FROM pickup_dispatch_outbox''')
         if 'result_action' not in [row['name'] for row in c.execute('PRAGMA table_info(pickup_dispatch_outbox)')]:
             c.execute('ALTER TABLE pickup_dispatch_outbox ADD COLUMN result_action TEXT NOT NULL DEFAULT ""')
+        if 'payment_wait_until' not in [row['name'] for row in c.execute('PRAGMA table_info(pickup_dispatch_outbox)')]:
+            c.execute('ALTER TABLE pickup_dispatch_outbox ADD COLUMN payment_wait_until REAL NOT NULL DEFAULT 0')
         init_dispatch_workflow(c)
 init_db()
 
@@ -401,7 +404,8 @@ def enqueue_pickup_dispatch(event):
             group=selected_pickup_group(c)
             if not active_pickup_group(group) or source.get('groupId')!=group['group_id'] or stamp<group['event_stamp']: return False
             case=c.execute('SELECT * FROM cases WHERE id=?',(case_id,)).fetchone()
-            if not case or not pickup_eligible(dict(case)): return False
+            gate=pickup_dispatch_gate(dict(case) if case else None,c)
+            if gate=='blocked': return False
             latest=c.execute('SELECT MAX(event_stamp) FROM pickup_dispatch_events WHERE case_id=?',(case_id,)).fetchone()[0]
             # Record every valid event once, including repetitions received
             # while another command is in flight. Such events are never replayed.
@@ -410,13 +414,54 @@ def enqueue_pickup_dispatch(event):
             if latest is not None and stamp<=latest: return False
             prior=c.execute('SELECT state FROM pickup_dispatch_outbox WHERE case_id=?',(case_id,)).fetchone()
             if prior and prior['state'] not in ('completed','cancelled'): return False
-            inserted=c.execute('''INSERT INTO pickup_dispatch_outbox(case_id,group_id,command_id,created,event_stamp)
-                VALUES(?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET group_id=excluded.group_id,
+            now=time.time(); waiting=gate!='ready'
+            inserted=c.execute('''INSERT INTO pickup_dispatch_outbox(case_id,group_id,command_id,created,event_stamp,last_error,payment_wait_until)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET group_id=excluded.group_id,
                 command_id=excluded.command_id,created=excluded.created,event_stamp=excluded.event_stamp,
-                state='pending',attempts=0,next_attempt=0,last_error='',synced_at='',result_action='' ''',
-                (case_id,group['group_id'],command_id,time.time(),stamp)).rowcount
+                state='pending',attempts=0,next_attempt=0,last_error=excluded.last_error,
+                payment_wait_until=excluded.payment_wait_until,synced_at='',result_action='' ''',
+                (case_id,group['group_id'],command_id,now,stamp,gate if waiting else '',
+                 now+PICKUP_DISPATCH_PAYMENT_WAIT_SECONDS if waiting else 0)).rowcount
     if inserted: CLOUD_WAKE.set()
+    if inserted and waiting: wake_dispatch_payment_check()
     return bool(inserted)
+
+
+def wake_dispatch_payment_check():
+    """Wake the normal payment worker; this never grants payment authority."""
+    if PAYMENTS is not None:
+        try: PAYMENTS.wake()
+        except Exception: pass
+
+
+def pickup_dispatch_gate(case,c):
+    """Separate group reporting rights from temporary payment freshness/sync."""
+    if not case or case.get('status') in ('已取消','不維修退回') or not pickup_requested(case):
+        return 'blocked'
+    if payment_case_allowed(case): return 'ready'
+    # Only an already enrolled row with a real paid/free binding may wait.
+    enrolled=c.execute("SELECT 1 FROM pickup_outbox WHERE case_id=? AND (state='synced' OR synced_at<>'')",(case['id'],)).fetchone()
+    if not enrolled or PAYMENTS is None: return 'blocked'
+    try: reason=PAYMENTS.dispatch_wait_reason(case)
+    except Exception: return 'blocked'
+    if reason in ('payment_sync_pending','payment_refresh_pending'): return reason
+    # The normal payment worker may have completed the acknowledgment between
+    # the first check and the wait classifier. Re-read authority, never guess.
+    return 'ready' if payment_case_allowed(case) else 'blocked'
+
+
+def defer_pickup_dispatch(c,row,gate,now):
+    """Keep a signed report for at most five minutes without a Google write."""
+    deadline=row['payment_wait_until'] or now+PICKUP_DISPATCH_PAYMENT_WAIT_SECONDS
+    expired=bool(row['payment_wait_until'] and now>=deadline)
+    if gate=='blocked' or expired:
+        c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error=?,next_attempt=0 WHERE case_id=? AND command_id=?",
+            ('payment_wait_expired' if expired else 'case_ineligible',row['case_id'],row['command_id']))
+        return {'processed':True,'state':'cancelled'}
+    c.execute("UPDATE pickup_dispatch_outbox SET state='pending',last_error=?,next_attempt=?,payment_wait_until=? WHERE case_id=? AND command_id=?",
+        (gate,min(now+5,deadline),deadline,row['case_id'],row['command_id']))
+    wake_dispatch_payment_check()
+    return {'processed':True,'state':'payment_verification_pending'}
 
 
 def pickup_dispatch_ping(endpoint,secret,sheet_id):
@@ -449,9 +494,9 @@ def pickup_dispatch_process_once(case_id=None):
                     return {'processed':True,'state':'cancelled'}
                 if not active_pickup_group(group): return {'processed':False,'state':'group_verification_pending'}
                 case=c.execute('SELECT * FROM cases WHERE id=?',(row['case_id'],)).fetchone()
-                if not case or not pickup_eligible(dict(case)):
-                    c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=?",(row['case_id'],))
-                    return {'processed':True,'state':'cancelled'}
+                gate=pickup_dispatch_gate(dict(case) if case else None,c)
+                if gate!='ready' or row['payment_wait_until'] and stamp>=row['payment_wait_until']:
+                    return defer_pickup_dispatch(c,row,gate,stamp)
             fingerprint=cloud_fingerprint(values)
             if PICKUP_DISPATCH_VERIFIED_FINGERPRINT!=fingerprint:
                 if stamp<PICKUP_DISPATCH_VERIFY_NEXT: return {'processed':False,'state':'verification_pending'}
@@ -468,16 +513,20 @@ def pickup_dispatch_process_once(case_id=None):
                 # A provider check happens outside a DB transaction; re-read the
                 # saved case before claiming, without rewriting any case fields.
                 case=c.execute('SELECT * FROM cases WHERE id=?',(row['case_id'],)).fetchone()
-                if not case or not pickup_eligible(dict(case)):
-                    c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=?",(row['case_id'],))
-                    return {'processed':True,'state':'cancelled'}
+                gate=pickup_dispatch_gate(dict(case) if case else None,c)
+                if gate!='ready' or row['payment_wait_until'] and time.time()>=row['payment_wait_until']:
+                    return defer_pickup_dispatch(c,row,gate,time.time())
                 job=dict(row); attempts=job['attempts']+1
                 c.execute("UPDATE pickup_dispatch_outbox SET state='working',attempts=?,next_attempt=? WHERE case_id=?",(attempts,stamp+90,job['case_id']))
             dispatch={'caseId':job['case_id'],'commandId':job['command_id']}
             if not pickup_cases_allowed([job['case_id']]):
                 with connect() as c:
-                    c.execute("UPDATE pickup_dispatch_outbox SET state='cancelled',last_error='case_ineligible' WHERE case_id=? AND command_id=? AND state='working'",(job['case_id'],job['command_id']))
-                return {'processed':True,'state':'cancelled'}
+                    current=c.execute('SELECT * FROM pickup_dispatch_outbox WHERE case_id=? AND command_id=?',(job['case_id'],job['command_id'])).fetchone()
+                    case=c.execute('SELECT * FROM cases WHERE id=?',(job['case_id'],)).fetchone()
+                    gate=pickup_dispatch_gate(dict(case) if case else None,c)
+                    # A concurrent refresh can finish between the two reads;
+                    # retry it instead of writing after the final check failed.
+                    return defer_pickup_dispatch(c,current,gate if gate!='ready' else 'payment_refresh_pending',time.time())
             try:
                 result=pickup_dispatch_update(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'],dispatch)
                 synced=isinstance(result,dict) and result.get('state')=='synced'

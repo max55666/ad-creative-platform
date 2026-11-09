@@ -331,6 +331,52 @@ class ProductionPayments:
         except Exception:
             return False
 
+    def dispatch_wait_reason(self, case):
+        """Classify a temporary hold; never authorize dispatch or change payment.
+
+        A previously enrolled dispatch command may wait for a fresh payment
+        observation or its sheet acknowledgement. The strict is_allowed check
+        still gates every external dispatch write.
+        """
+        try:
+            if _case_data(case).get('paymentWorkflow') != WORKFLOW:
+                return ''
+            with self.connect() as c:
+                link = c.execute('SELECT * FROM wb_prod_links WHERE real_id=?', (case['id'],)).fetchone()
+            if not link or _fingerprint(case) != link['source_hash']:
+                return ''
+            self._current(link['wb_id'])
+            detail = self.desk.get_case(link['wb_id'])['case']
+            quote = detail.get('latestQuote')
+            preview = self.sync.preview(link['wb_id'])
+            row = preview['rows'][0]
+            queue = next((q for q in preview['queue'] if q['caseId'] == link['wb_id']), {})
+            if (not quote or quote['status'] != 'active'
+                    or row['quoteVersion'] != quote['version'] or row['amountDue'] != quote['total']):
+                return ''
+            if row['paymentStatus'] == '免付款':
+                if quote['total'] != 0 or quote['paymentStatus'] != 'no_payment_required':
+                    return ''
+            elif (row['paymentStatus'] != '已付款' or quote['total'] <= 0
+                    or row['amountPaid'] != quote['total']
+                    or not isinstance(row.get('paymentOrderNumber'), str)
+                    or not ORDER.fullmatch(row['paymentOrderNumber'])):
+                return ''
+            else:
+                checked = datetime.fromisoformat(row['checkedAt'].replace('Z', '+00:00'))
+                if checked.tzinfo is None:
+                    checked = checked.replace(tzinfo=TAIPEI)
+                age = (datetime.now(TAIPEI) - checked).total_seconds()
+                if age < 0:
+                    return ''
+                if age > 300:
+                    return 'payment_refresh_pending'
+            if queue.get('status') != 'synced' or row['syncRevision'] != queue.get('revision'):
+                return 'payment_sync_pending'
+            return ''
+        except Exception:
+            return ''
+
     def can_requote_free(self, wb_id):
         try:
             self._current(wb_id)

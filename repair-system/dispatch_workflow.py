@@ -73,6 +73,8 @@ def parse(event):
     if match and len(match[1]) <= 80: return 'case', {'caseId': match[1]}
     match = re.fullmatch(r'('+CASE+r')\s*已派車', text)
     if match and len(match[1]) <= 80: return 'dispatch', {'caseId': match[1]}
+    match = re.fullmatch(r'將\s+('+CASE+r')\s+標記為已派車', text)
+    if match and len(match[1]) <= 80: return 'dispatch', {'caseId': match[1]}
     return None
 
 
@@ -94,6 +96,15 @@ class DispatchWorkflow:
             rows = c.execute('''SELECT c.* FROM cases c JOIN pickup_outbox p ON p.case_id=c.id
                 WHERE p.state='synced' OR p.synced_at<>'' ORDER BY c.created,c.id''').fetchall()
         return [row['id'] for row in rows if self.s['pickup_eligible'](dict(row))]
+
+    def enrollment(self, case_id):
+        """A temporary payment refresh must not erase an acknowledged enrollment."""
+        with self.s['connect']() as c:
+            row=c.execute('''SELECT c.* FROM cases c JOIN pickup_outbox p ON p.case_id=c.id
+                WHERE c.id=? AND (p.state='synced' OR p.synced_at<>'')''',(case_id,)).fetchone()
+            if not row: return None
+            gate=self.s.get('pickup_dispatch_gate')
+            return gate(dict(row),c) if gate else 'blocked'
 
     def cases_allowed(self, ids):
         checker=self.s.get('pickup_cases_allowed')
@@ -199,10 +210,18 @@ class DispatchWorkflow:
                 group = self.group(c, source.get('groupId'))
                 if not group or stamp < group['event_stamp']: return False
             if kind in ('case', 'dispatch') and args['caseId'] not in self.allowlist():
-                # Preserve pre-existing manual text dispatch for legacy eligible
-                # cases; postback/query actions use the strict allowlist.
-                if kind == 'dispatch' and event.get('type') == 'message': return False
-                kind, args = 'error', {}
+                gate=self.enrollment(args['caseId'])
+                if gate is None:
+                    # Preserve pre-existing manual text dispatch for legacy
+                    # eligible cases, without admitting unknown postbacks.
+                    if kind == 'dispatch' and event.get('type') == 'message': return False
+                    kind, args = 'error', {}
+                elif gate=='blocked':
+                    kind='payment_blocked'
+                elif kind=='case':
+                    kind='payment_wait'
+                # Dispatch remains a signed group report for every member;
+                # its durable queue rechecks payment before any Google write.
             reply = event.get('replyToken')
             if isinstance(reply, str) and 1 <= len(reply) <= 1024:
                 deadline = min(now+45, stamp/1000+20*60)
@@ -232,6 +251,10 @@ class DispatchWorkflow:
         kind, args = job['kind'], json.loads(job['args'])
         if kind == 'menu': return self.feedback('已開啟派車工作選單')+self.menu()
         if kind == 'error': return [{'type':'text','text':'此案件不在已自動加入的派車名單中，無法查詢或回報。'}]+self.menu()
+        if kind == 'payment_wait':
+            return self.feedback(args['caseId']+'\n案件已加入派車名單，目前正在重新確認付款或等待同步，請稍後再查詢。')+self.menu()
+        if kind == 'payment_blocked':
+            return self.feedback(args['caseId']+'\n目前付款或案件狀態不允許回報派車，請客服確認。')+self.menu()
         if kind == 'dispatch':
             job['displayCaseIds']=[args['caseId']]
             with self.s['connect']() as c: queued = c.execute('SELECT * FROM pickup_dispatch_outbox WHERE case_id=?', (args['caseId'],)).fetchone()
@@ -243,6 +266,10 @@ class DispatchWorkflow:
             with self.s['connect']() as c: queued = c.execute('SELECT * FROM pickup_dispatch_outbox WHERE case_id=?', (args['caseId'],)).fetchone()
             if queued['state'] == 'completed':
                 text = '已更新派車狀態為「已派車」。' if queued['result_action'] == 'updated' else '已處理回報；已有狀態保持原樣。'
+            elif queued['state']=='cancelled':
+                text='付款確認等待逾時，請稍後重新回報。' if queued['last_error']=='payment_wait_expired' else '目前付款或案件狀態不允許更新，回報已停止，請客服確認。'
+            elif queued['last_error'] in ('payment_sync_pending','payment_refresh_pending'):
+                text='回報已收到，正在確認付款及雲端同步，確認通過後會自動更新為「已派車」。若 5 分鐘內仍未完成，請重新查詢後回報。'
             else: text = '回報已收到，目前同步尚未完成，可重新查詢名單確認。'
             return self.feedback(args['caseId']+'\n'+text)+self.menu()
         allowed = self.allowlist()
