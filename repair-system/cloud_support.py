@@ -153,7 +153,10 @@ def payload_hash(record):
 
 def validate_dispatch(dispatch):
     """A fixed status command from a verified webhook, never arbitrary cells."""
-    if (not isinstance(dispatch, dict) or set(dispatch) != {'caseId', 'commandId'}
+    from dispatch_cards import REPEAT_ID
+    if (not isinstance(dispatch, dict) or set(dispatch) - {'repeatRequestId'} != {'caseId', 'commandId'}
+            or 'repeatRequestId' in dispatch and (not isinstance(dispatch['repeatRequestId'], str)
+                or not re.fullmatch(REPEAT_ID, dispatch['repeatRequestId']))
             or not isinstance(dispatch.get('caseId'), str)
             or not re.fullmatch(r'R[0-9]{8}-[0-9]{4,}', dispatch['caseId'])
             or len(dispatch['caseId']) > 80
@@ -232,8 +235,9 @@ def _send(endpoint, secret, sheet_id, operation, record=None, opener=None):
         if operation == 'updatePickupDispatch':
             valid = (valid and result.get('caseId') == record['caseId']
                      and result.get('commandId') == record['commandId']
-                     and result.get('status') == '已派車'
-                     and result.get('action') in ('updated', 'unchanged'))
+                     and (result.get('status') == '已派車' and result.get('action') in ('updated', 'unchanged')
+                          or result.get('action') == 'stale_request'
+                          and result.get('status') in ('', '已派車', '待再次派車')))
         if not valid:
             if isinstance(result, dict) and result.get('error') == 'unauthorized':
                 return {'state': 'failed', 'error': '雲端同步金鑰不符'}
@@ -288,6 +292,7 @@ def update_pickup_dispatch(endpoint, secret, sheet_id, dispatch, opener=None):
 
 def read_pickup_dispatch(endpoint, secret, sheet_id, case_ids, opener=None):
     """Read only enrolled case rows from the fixed dispatch sheet, never all rows."""
+    from dispatch_cards import valid_dispatch_cycle
     failure = {'state': 'failed', 'error': '派車名單暫時無法查詢，請稍後再試'}
     fields = {'date': 64, 'name': 200, 'phone': 40, 'address': 1000,
               'model': 120, 'status': 120}
@@ -323,7 +328,8 @@ def read_pickup_dispatch(endpoint, secret, sheet_id, case_ids, opener=None):
             return failure.copy()
         expected_keys = {'caseId', *fields}
         for ident, record in zip(case_ids, result['cases']):
-            if (not isinstance(record, dict) or set(record) != expected_keys
+            if (not isinstance(record, dict) or set(record) - {'repeatRequestId'} != expected_keys
+                    or not valid_dispatch_cycle(record)
                     or record['caseId'] != ident
                     or any(not isinstance(record.get(key), str)
                            or len(record[key].encode('utf-16-le')) // 2 > limit

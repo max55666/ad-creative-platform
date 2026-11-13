@@ -9,13 +9,21 @@ BUTTON_COLOR = "#e4eee8"
 _CASE_ID = re.compile(r"R[0-9]{8}-[0-9]{4,}\Z")
 _SNAPSHOT = re.compile(r"[A-Za-z0-9_-]{16,64}\Z")
 _CASE_FIELDS = {"caseId", "name", "phone", "address", "model"}
-_OPTIONAL_FIELDS = {"date", "status"}
+_OPTIONAL_FIELDS = {"date", "status", "repeatRequestId"}
+REPEAT_STATUS = "待再次派車"
+REPEAT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 _BUBBLE_BYTES = 30000
 _CAROUSEL_BYTES = 50000
 
 
 def _bad():
     raise ValueError("Dispatch card data is invalid or exceeds LINE limits")
+
+
+def valid_dispatch_cycle(case):
+    if "repeatRequestId" not in case: return True
+    value = case["repeatRequestId"]
+    return case.get("status") == REPEAT_STATUS and isinstance(value, str) and re.fullmatch(REPEAT_ID, value) is not None
 
 
 def _units(text):
@@ -109,7 +117,7 @@ def _telephone(phone):
 
 def _case_bubble(case, title="未派車案件", include_status=False):
     if (not isinstance(case, dict) or not _CASE_FIELDS <= set(case)
-            or not set(case) <= _CASE_FIELDS | _OPTIONAL_FIELDS):
+            or not set(case) <= _CASE_FIELDS | _OPTIONAL_FIELDS or not valid_dispatch_cycle(case)):
         _bad()
     ident = _text_value(case["caseId"], 80, True)
     if not _CASE_ID.fullmatch(ident):
@@ -125,7 +133,12 @@ def _case_bubble(case, title="未派車案件", include_status=False):
     for label, key in (("姓名", "name"), ("聯絡電話", "phone"), ("回收地址", "address"), ("機型", "model")):
         body.append({"type": "box", "layout": "vertical", "spacing": "xs", "contents": [
             _text(label, "xs", "#6b817b"), _text(values[key] or "未提供", "md")]})
-    buttons = [_postback("標記已派車", "pv1:dispatch:" + ident, "將 " + ident + " 標記為已派車")]
+    if "repeatRequestId" in case:
+        title = "再次派車案件"
+        buttons = [_postback("回報已再次派車", "pv1:repeat:" + ident + ":" + case["repeatRequestId"],
+                             "回報 " + ident + " 已再次派車")]
+    else:
+        buttons = [_postback("標記已派車", "pv1:dispatch:" + ident, "將 " + ident + " 標記為已派車")]
     phone_uri = _telephone(values["phone"])
     if phone_uri:
         buttons.append({"type": "button", "height": "sm", "style": "secondary",

@@ -7,6 +7,7 @@ import secrets
 import threading
 import time
 import uuid
+from dispatch_cards import REPEAT_ID
 
 TAIPEI = dt.timezone(dt.timedelta(hours=8))
 CASE = r'R[0-9]{8}-[0-9]{4,}'
@@ -61,6 +62,9 @@ def parse(event):
             if match: return 'next', {'snapshot': match[1], 'page': int(match[2])}
             match = re.fullmatch(r'pv1:dispatch:('+CASE+r')', value)
             if match and len(match[1]) <= 80: return 'dispatch', {'caseId': match[1]}
+            match = re.fullmatch(r'pv1:repeat:('+CASE+r'):('+REPEAT_ID+r')', value)
+            if match and len(match[1]) <= 80:
+                return 'dispatch', {'caseId': match[1], 'repeatRequestId': match[2]}
         return None
     message = event.get('message', {})
     if event.get('type') != 'message' or not isinstance(message, dict) or message.get('type') != 'text': return None
@@ -144,8 +148,9 @@ class DispatchWorkflow:
             footer=bubble.get('footer',{})
             for button in footer.get('contents',[]) if isinstance(footer,dict) else []:
                 action=button.get('action',{}) if isinstance(button,dict) else {}
-                if action.get('data') in {'pv1:dispatch:'+ident for ident in own_ids}:
-                    action['label']='測試標記已派車'
+                data=action.get('data','')
+                if any(data=='pv1:dispatch:'+ident or data.startswith('pv1:repeat:'+ident+':') for ident in own_ids):
+                    action['label']='測試'+action['label']
                     if 'displayText' in action: action['displayText']='測試回報：'+action['displayText']
         for index,message in enumerate(marked):
             if message.get('type')=='text' and index==0:
@@ -236,7 +241,10 @@ class DispatchWorkflow:
         if kind == 'dispatch':
             converted = dict(event)
             converted.update(type='message', message={'type':'text','text':args['caseId']+'已派車'})
-            self.s['enqueue_pickup_dispatch'](converted)
+            if 'repeatRequestId' in args:
+                self.s['enqueue_pickup_dispatch'](converted, repeat_request_id=args['repeatRequestId'])
+            else:
+                self.s['enqueue_pickup_dispatch'](converted)
         if inserted: self.query_wake.set()
         return True
 
@@ -264,8 +272,15 @@ class DispatchWorkflow:
                 return self.feedback(text)+self.menu()
             result = self.s['pickup_dispatch_process_once'](case_id=args['caseId'])
             with self.s['connect']() as c: queued = c.execute('SELECT * FROM pickup_dispatch_outbox WHERE case_id=?', (args['caseId'],)).fetchone()
+            if not queued or queued['command_id'] != job['event_id']:
+                return self.feedback('已有更新的派車回報，請重新查詢名單確認。')+self.menu()
             if queued['state'] == 'completed':
-                text = '已更新派車狀態為「已派車」。' if queued['result_action'] == 'updated' else '已處理回報；已有狀態保持原樣。'
+                if queued['result_action'] == 'updated' and args.get('repeatRequestId'):
+                    text='已完成這次再次派車回報。'
+                else:
+                    text = '已更新派車狀態為「已派車」。' if queued['result_action'] == 'updated' else '已處理回報；已有狀態保持原樣。'
+            elif queued['state']=='cancelled' and queued['last_error']=='stale_request':
+                text='這則回報與目前的派車申請不符。請點「查看未派車名單」，在本次申請的卡片上回報。'
             elif queued['state']=='cancelled':
                 text='付款確認等待逾時，請稍後重新回報。' if queued['last_error']=='payment_wait_expired' else '目前付款或案件狀態不允許更新，回報已停止，請客服確認。'
             elif queued['last_error'] in ('payment_sync_pending','payment_refresh_pending'):
@@ -283,7 +298,7 @@ class DispatchWorkflow:
             queried=dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S')
             return self.feedback('案件資料已查詢',queried)+self.case_cards(row,queried)
         rows = self.read(allowed)
-        unassigned = [row for row in rows if row['status'] == '']
+        unassigned = [row for row in rows if row['status'] == '' or row.get('repeatRequestId')]
         job['displayCaseIds']=[row['caseId'] for row in unassigned]
         queried = dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S')
         if kind == 'count': return self.feedback('未派車數量已查詢',queried,'目前未派車 '+str(len(unassigned))+' 筆。')+self.menu(len(unassigned))
@@ -400,7 +415,7 @@ class DispatchWorkflow:
                     c.execute("UPDATE dispatch_daily_jobs SET state='cancelled' WHERE job_key=?", (row['job_key'],)); return {'processed':True,'state':'cancelled'}
                 job=dict(row); c.execute("UPDATE dispatch_daily_jobs SET state='working',next_attempt=? WHERE job_key=?", (now+90,job['job_key']))
             try:
-                rows=self.read(self.allowlist()); waiting=[r for r in rows if r['status']=='']
+                rows=self.read(self.allowlist()); waiting=[r for r in rows if r['status']=='' or r.get('repeatRequestId')]
                 ids=[r['caseId'] for r in waiting]; snapshot=self.snapshot(job['group_id'],ids)
                 queried=dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S'); pages=max(1,math.ceil(len(waiting)/10))
                 batches=[self.mark_test_messages(self.cards(waiting[p*10:p*10+10],len(waiting),snapshot,p+1,pages,queried,daily=True),ids) for p in range(pages)]

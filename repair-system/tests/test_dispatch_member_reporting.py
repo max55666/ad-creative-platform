@@ -179,5 +179,81 @@ class MemberReportingTests(unittest.TestCase):
             case=dict(c.execute('SELECT * FROM cases WHERE id=?',(CASE,)).fetchone())
             self.assertEqual(self.m.pickup_dispatch_gate(case,c),'ready')
 
+    def test_repeat_cycle_reaches_list_daily_card_and_matching_group_report(self):
+        import datetime as dt
+        from dispatch_workflow import TAIPEI
+        cycle = str(uuid.uuid4())
+        row = dict(caseId=CASE, name='測試', phone='', address='測試', model='測試', date='',
+                   status='待再次派車', repeatRequestId=cycle)
+        workflow = self.m.WORKFLOW
+        def read_case(ids):
+            self.assertEqual(ids, [CASE])
+            return [row.copy()]
+        workflow.read = read_case
+        today = dt.datetime.now(TAIPEI).replace(hour=8, minute=0, second=0, microsecond=0)
+        workflow.clock = lambda: today.timestamp()
+        with self.m.connect() as c:
+            c.execute('UPDATE dispatch_workflow_settings SET daily_enabled=1,group_id=?,first_date=?',
+                      (GROUP, today.date().isoformat()))
+        self.assertTrue(workflow.schedule_once())
+        self.assertEqual(workflow.prepare_daily_once()['state'], 'ready')
+        with self.m.connect() as c:
+            stored = c.execute('SELECT messages FROM dispatch_workflow_push').fetchone()[0]
+        data = 'pv1:repeat:'+CASE+':'+cycle
+        self.assertIn(data, stored)
+        query = lambda: workflow.messages({'kind':'list','args':'{}','group_id':GROUP})
+        self.assertIn(data, json.dumps(query(),ensure_ascii=False))
+        # An operator typing the reserved-looking label into I did not request a cycle.
+        row.pop('repeatRequestId')
+        self.assertIn('目前沒有未派車案件', json.dumps(query(),ensure_ascii=False))
+
+        event = self.event()
+        event['postback']['data'] = data
+        workflow.clock = time.time
+        self.assertTrue(workflow.enqueue(event))
+        self.assertEqual(self.job()['repeat_request_id'], cycle)
+        self.assertEqual(self.process()['state'], 'completed')
+        self.assertEqual(self.m.pickup_dispatch_update.call_args.args[3],
+                         dict(caseId=CASE,commandId=event['webhookEventId'],repeatRequestId=cycle))
+        self.assertIn('已完成這次再次派車回報', self.reply())
+        workflow.enqueue(event)
+        self.assertEqual(self.process()['state'], 'idle')
+        self.assertEqual(self.m.pickup_dispatch_update.call_count, 1)
+
+    def test_old_card_gets_stale_guidance_and_new_cycle_can_be_reported(self):
+        self.m.pickup_dispatch_update.return_value = {'state':'synced','action':'stale_request'}
+        workflow = self.m.WORKFLOW
+        fresh = self.event()
+        self.assertTrue(workflow.enqueue(fresh))
+        self.assertEqual(self.process()['state'],'cancelled')
+        self.assertEqual(self.job()['synced_at'],'')
+        self.assertIn('請點「查看未派車名單」', self.reply())
+        self.assertNotIn('repeatRequestId', self.m.pickup_dispatch_update.call_args.args[3])
+        cycle = str(uuid.uuid4())
+        event = self.event()
+        event['postback']['data'] = 'pv1:repeat:'+CASE+':'+cycle
+        self.assertTrue(workflow.enqueue(event))
+        # Payment can be withdrawn between receiving the report and writing the sheet.
+        self.m.PAYMENTS.ready = False
+        self.m.PAYMENTS.reason = ''
+        self.assertEqual(self.process()['state'], 'cancelled')
+        self.assertEqual(self.m.pickup_dispatch_update.call_count, 1)
+
+    def test_repeat_uuid_is_not_accepted_from_text_or_wrong_group(self):
+        from dispatch_workflow import parse
+        from cloud_support import validate_dispatch
+        cycle = str(uuid.uuid4())
+        command = dict(caseId=CASE,commandId='test',repeatRequestId=cycle)
+        self.assertEqual(validate_dispatch(command), command)
+        with self.assertRaises(ValueError):
+            validate_dispatch({**command,'repeatRequestId':cycle.upper()})
+        event = self.event(group='C'+'c'*32)
+        event['postback']['data'] = 'pv1:repeat:'+CASE+':'+cycle
+        self.assertFalse(self.m.WORKFLOW.enqueue(event))
+        typed = self.event(kind='message')
+        typed['message']['text'] = event['postback']['data']
+        self.assertIsNone(parse(typed))
+        self.assertIsNone(self.job())
+
 
 if __name__=='__main__': unittest.main()

@@ -170,6 +170,8 @@ def init_db():
             c.execute('ALTER TABLE pickup_dispatch_outbox ADD COLUMN result_action TEXT NOT NULL DEFAULT ""')
         if 'payment_wait_until' not in [row['name'] for row in c.execute('PRAGMA table_info(pickup_dispatch_outbox)')]:
             c.execute('ALTER TABLE pickup_dispatch_outbox ADD COLUMN payment_wait_until REAL NOT NULL DEFAULT 0')
+        if 'repeat_request_id' not in [row['name'] for row in c.execute('PRAGMA table_info(pickup_dispatch_outbox)')]:
+            c.execute("ALTER TABLE pickup_dispatch_outbox ADD COLUMN repeat_request_id TEXT NOT NULL DEFAULT ''")
         init_dispatch_workflow(c)
 init_db()
 
@@ -387,9 +389,11 @@ def pickup_dispatch_status():
             'completed':counts.get('completed',0),'lastSynced':last or ''}
 
 
-def enqueue_pickup_dispatch(event):
+def enqueue_pickup_dispatch(event, *, repeat_request_id=''):
     """Accept only a signed group command after webhook destination verification."""
-    if not pickup_dispatch_available() or event.get('type')!='message': return False
+    from dispatch_cards import REPEAT_ID
+    if (not pickup_dispatch_available() or event.get('type')!='message'
+            or not isinstance(repeat_request_id,str) or repeat_request_id and not re.fullmatch(REPEAT_ID,repeat_request_id)): return False
     source=event.get('source',{}); message=event.get('message',{})
     if not isinstance(source,dict) or source.get('type')!='group' or not isinstance(message,dict) or message.get('type')!='text': return False
     text=message.get('text'); command_id=event.get('webhookEventId'); stamp=event.get('timestamp')
@@ -415,13 +419,13 @@ def enqueue_pickup_dispatch(event):
             prior=c.execute('SELECT state FROM pickup_dispatch_outbox WHERE case_id=?',(case_id,)).fetchone()
             if prior and prior['state'] not in ('completed','cancelled'): return False
             now=time.time(); waiting=gate!='ready'
-            inserted=c.execute('''INSERT INTO pickup_dispatch_outbox(case_id,group_id,command_id,created,event_stamp,last_error,payment_wait_until)
-                VALUES(?,?,?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET group_id=excluded.group_id,
+            inserted=c.execute('''INSERT INTO pickup_dispatch_outbox(case_id,group_id,command_id,created,event_stamp,last_error,payment_wait_until,repeat_request_id)
+                VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(case_id) DO UPDATE SET group_id=excluded.group_id,
                 command_id=excluded.command_id,created=excluded.created,event_stamp=excluded.event_stamp,
                 state='pending',attempts=0,next_attempt=0,last_error=excluded.last_error,
-                payment_wait_until=excluded.payment_wait_until,synced_at='',result_action='' ''',
+                payment_wait_until=excluded.payment_wait_until,repeat_request_id=excluded.repeat_request_id,synced_at='',result_action='' ''',
                 (case_id,group['group_id'],command_id,now,stamp,gate if waiting else '',
-                 now+PICKUP_DISPATCH_PAYMENT_WAIT_SECONDS if waiting else 0)).rowcount
+                 now+PICKUP_DISPATCH_PAYMENT_WAIT_SECONDS if waiting else 0,repeat_request_id)).rowcount
     if inserted: CLOUD_WAKE.set()
     if inserted and waiting: wake_dispatch_payment_check()
     return bool(inserted)
@@ -519,6 +523,8 @@ def pickup_dispatch_process_once(case_id=None):
                 job=dict(row); attempts=job['attempts']+1
                 c.execute("UPDATE pickup_dispatch_outbox SET state='working',attempts=?,next_attempt=? WHERE case_id=?",(attempts,stamp+90,job['case_id']))
             dispatch={'caseId':job['case_id'],'commandId':job['command_id']}
+            if job['repeat_request_id']:
+                dispatch['repeatRequestId']=job['repeat_request_id']
             if not pickup_cases_allowed([job['case_id']]):
                 with connect() as c:
                     current=c.execute('SELECT * FROM pickup_dispatch_outbox WHERE case_id=? AND command_id=?',(job['case_id'],job['command_id'])).fetchone()
@@ -531,13 +537,17 @@ def pickup_dispatch_process_once(case_id=None):
                 result=pickup_dispatch_update(values['googleSheetEndpoint'],values['googleSheetSecret'],values['googleSheetId'],dispatch)
                 synced=isinstance(result,dict) and result.get('state')=='synced'
             except Exception: synced=False
+            action=result.get('action','') if synced else ''
             finished=time.time(); state='completed' if synced else 'failed'
+            if action=='stale_request':
+                state='cancelled'
             with connect() as c:
                 c.execute('''UPDATE pickup_dispatch_outbox SET state=?,next_attempt=?,last_error=?,synced_at=?,result_action=?
                     WHERE case_id=? AND command_id=? AND state='working' ''',
                     (state,0 if synced else finished+min(3600,30*2**min(attempts-1,7)),
-                     '' if synced else 'pickup_dispatch_failed',cloud_timestamp(finished) if synced else '',
-                     result.get('action','') if synced and result.get('action') in ('updated','unchanged') else '',job['case_id'],job['command_id']))
+                     'stale_request' if state=='cancelled' else ('' if synced else 'pickup_dispatch_failed'),
+                     cloud_timestamp(finished) if state=='completed' else '',
+                     action if action in ('updated','unchanged') else '',job['case_id'],job['command_id']))
             return {'processed':True,'state':state}
 
 
