@@ -2,6 +2,7 @@
 
 import json
 import re
+from datetime import datetime
 
 
 GREEN = "#315e50"
@@ -9,7 +10,7 @@ BUTTON_COLOR = "#e4eee8"
 _CASE_ID = re.compile(r"R[0-9]{8}-[0-9]{4,}\Z")
 _SNAPSHOT = re.compile(r"[A-Za-z0-9_-]{16,64}\Z")
 _CASE_FIELDS = {"caseId", "name", "phone", "address", "model"}
-_OPTIONAL_FIELDS = {"date", "status", "repeatRequestId"}
+_OPTIONAL_FIELDS = {"date", "status", "repeatRequestId", "repeatRequestedAt"}
 REPEAT_STATUS = "待再次派車"
 REPEAT_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 _BUBBLE_BYTES = 30000
@@ -21,9 +22,16 @@ def _bad():
 
 
 def valid_dispatch_cycle(case):
-    if "repeatRequestId" not in case: return True
-    value = case["repeatRequestId"]
-    return case.get("status") == REPEAT_STATUS and isinstance(value, str) and re.fullmatch(REPEAT_ID, value) is not None
+    if "repeatRequestId" not in case: return "repeatRequestedAt" not in case
+    value, stamp = case["repeatRequestId"], case.get("repeatRequestedAt")
+    if (case.get("status") != REPEAT_STATUS or not isinstance(value, str) or not re.fullmatch(REPEAT_ID, value)
+            or not isinstance(stamp, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z", stamp)):
+        return False
+    try:
+        datetime.fromisoformat(stamp[:-1] + "+00:00")
+        return True
+    except ValueError:
+        return False
 
 
 def _units(text):

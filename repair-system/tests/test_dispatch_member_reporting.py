@@ -183,14 +183,16 @@ class MemberReportingTests(unittest.TestCase):
         import datetime as dt
         from dispatch_workflow import TAIPEI
         cycle = str(uuid.uuid4())
+        today = dt.datetime.now(TAIPEI).replace(hour=8, minute=0, second=0, microsecond=0)
+        yesterday = (today.replace(hour=0)-dt.timedelta(milliseconds=1)).astimezone(dt.timezone.utc)
         row = dict(caseId=CASE, name='測試', phone='', address='測試', model='測試', date='',
-                   status='待再次派車', repeatRequestId=cycle)
+                   status='待再次派車', repeatRequestId=cycle,
+                   repeatRequestedAt=yesterday.isoformat(timespec='milliseconds').replace('+00:00','Z'))
         workflow = self.m.WORKFLOW
         def read_case(ids):
             self.assertEqual(ids, [CASE])
             return [row.copy()]
         workflow.read = read_case
-        today = dt.datetime.now(TAIPEI).replace(hour=8, minute=0, second=0, microsecond=0)
         workflow.clock = lambda: today.timestamp()
         with self.m.connect() as c:
             c.execute('UPDATE dispatch_workflow_settings SET daily_enabled=1,group_id=?,first_date=?',
@@ -205,6 +207,7 @@ class MemberReportingTests(unittest.TestCase):
         self.assertIn(data, json.dumps(query(),ensure_ascii=False))
         # An operator typing the reserved-looking label into I did not request a cycle.
         row.pop('repeatRequestId')
+        row.pop('repeatRequestedAt')
         self.assertIn('目前沒有未派車案件', json.dumps(query(),ensure_ascii=False))
 
         event = self.event()
@@ -219,6 +222,33 @@ class MemberReportingTests(unittest.TestCase):
         workflow.enqueue(event)
         self.assertEqual(self.process()['state'], 'idle')
         self.assertEqual(self.m.pickup_dispatch_update.call_count, 1)
+
+    def test_repeat_requests_today_are_visible_now_and_scheduled_from_tomorrow(self):
+        import datetime as dt
+        from dispatch_workflow import TAIPEI
+        from dispatch_cards import valid_dispatch_cycle
+        workflow = self.m.WORKFLOW
+        first = dt.datetime(2026,11,14,8,tzinfo=TAIPEI)
+        cycle = str(uuid.uuid4())
+        row = dict(caseId=CASE,date='',name='測試',phone='',address='',model='測試',
+                   status='待再次派車',repeatRequestId=cycle,repeatRequestedAt='2026-11-13T23:59:00.000Z')
+        for stamp in ('', None, '2026-02-30T00:00:00.000Z', '2026-11-13T23:59:00+00:00'):
+            with self.subTest(stamp=stamp):
+                self.assertFalse(valid_dispatch_cycle({**row,'repeatRequestedAt':stamp}))
+        workflow.read = lambda ids: [row.copy()]
+        with self.m.connect() as c:
+            c.execute('UPDATE dispatch_workflow_settings SET daily_enabled=1,group_id=?,first_date=?',
+                      (GROUP, first.date().isoformat()))
+        for days, expected in [(0,False),(1,True),(2,True)]:
+            morning = first + dt.timedelta(days=days)
+            workflow.clock = lambda: morning.timestamp()
+            self.assertIn(cycle,json.dumps(workflow.messages({'kind':'list','args':'{}','group_id':GROUP})))
+            self.assertTrue(workflow.schedule_once())
+            self.assertEqual(workflow.prepare_daily_once()['state'],'ready')
+            with self.m.connect() as c:
+                data = c.execute('SELECT messages FROM dispatch_workflow_push WHERE job_key=?',
+                                  ('daily:'+GROUP+':'+morning.date().isoformat(),)).fetchone()[0]
+            self.assertEqual(cycle in data,expected)
 
     def test_old_card_gets_stale_guidance_and_new_cycle_can_be_reported(self):
         self.m.pickup_dispatch_update.return_value = {'state':'synced','action':'stale_request'}

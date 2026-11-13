@@ -415,7 +415,12 @@ class DispatchWorkflow:
                     c.execute("UPDATE dispatch_daily_jobs SET state='cancelled' WHERE job_key=?", (row['job_key'],)); return {'processed':True,'state':'cancelled'}
                 job=dict(row); c.execute("UPDATE dispatch_daily_jobs SET state='working',next_attempt=? WHERE job_key=?", (now+90,job['job_key']))
             try:
-                rows=self.read(self.allowlist()); waiting=[r for r in rows if r['status']=='' or r.get('repeatRequestId')]
+                rows=self.read(self.allowlist())
+                # The receiver supplies canonical UTC timestamps. Include repeat requests
+                # starting on the first Taipei calendar day after staff submit them.
+                day_start=dt.datetime.combine(dt.date.fromisoformat(job['local_date']),dt.time.min,TAIPEI)
+                cutoff=day_start.astimezone(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+                waiting=[r for r in rows if r['status']=='' or (r.get('repeatRequestId') and r['repeatRequestedAt'] < cutoff)]
                 ids=[r['caseId'] for r in waiting]; snapshot=self.snapshot(job['group_id'],ids)
                 queried=dt.datetime.fromtimestamp(self.clock(),TAIPEI).strftime('%Y-%m-%d %H:%M:%S'); pages=max(1,math.ceil(len(waiting)/10))
                 batches=[self.mark_test_messages(self.cards(waiting[p*10:p*10+10],len(waiting),snapshot,p+1,pages,queried,daily=True),ids) for p in range(pages)]

@@ -328,7 +328,7 @@ def read_pickup_dispatch(endpoint, secret, sheet_id, case_ids, opener=None):
             return failure.copy()
         expected_keys = {'caseId', *fields}
         for ident, record in zip(case_ids, result['cases']):
-            if (not isinstance(record, dict) or set(record) - {'repeatRequestId'} != expected_keys
+            if (not isinstance(record, dict) or set(record) - {'repeatRequestId','repeatRequestedAt'} != expected_keys
                     or not valid_dispatch_cycle(record)
                     or record['caseId'] != ident
                     or any(not isinstance(record.get(key), str)
