@@ -223,6 +223,41 @@ class MemberReportingTests(unittest.TestCase):
         self.assertEqual(self.process()['state'], 'idle')
         self.assertEqual(self.m.pickup_dispatch_update.call_count, 1)
 
+    def test_daily_list_retains_enrolled_unassigned_during_sheet_sync(self):
+        self.check_daily_temporary_hold('payment_sync_pending', False)
+
+    def test_daily_list_retains_repeat_during_payment_refresh(self):
+        self.check_daily_temporary_hold('payment_refresh_pending', True)
+
+    def check_daily_temporary_hold(self, reason, repeat):
+        import datetime as dt
+        from dispatch_workflow import TAIPEI
+        workflow = self.m.WORKFLOW
+        self.m.PAYMENTS.ready = False
+        self.m.PAYMENTS.reason = reason
+        morning = dt.datetime(2026, 11, 16, 8, tzinfo=TAIPEI)
+        row = dict(caseId=CASE, date='', name='測試', phone='', address='', model='測試', status='')
+        if repeat:
+            row.update(status='待再次派車', repeatRequestId=str(uuid.uuid4()),
+                       repeatRequestedAt='2026-11-13T12:28:04.525Z')
+        workflow.read = lambda ids: [row.copy()] if CASE in ids else []
+        workflow.clock = lambda: morning.timestamp()
+        with self.m.connect() as c:
+            c.execute('UPDATE dispatch_workflow_settings SET daily_enabled=1,group_id=?,first_date=?',
+                      (GROUP, morning.date().isoformat()))
+        self.assertEqual(workflow.allowlist(), [CASE])
+        self.assertTrue(workflow.cases_allowed([CASE]))
+        self.assertFalse(self.m.pickup_cases_allowed([CASE]))
+        self.assertIn(CASE, json.dumps(workflow.messages({'kind':'list','args':'{}','group_id':GROUP})))
+        self.assertTrue(workflow.schedule_once())
+        self.assertEqual(workflow.prepare_daily_once()['state'], 'ready')
+        with self.m.connect() as c:
+            self.assertIn(CASE, c.execute('SELECT messages FROM dispatch_workflow_push').fetchone()[0])
+        self.m.PAYMENTS.reason = ''
+        self.assertEqual(workflow.allowlist(), [])
+        self.assertFalse(workflow.cases_allowed([CASE]))
+        self.m.pickup_dispatch_update.assert_not_called()
+
     def test_repeat_requests_today_are_visible_now_and_scheduled_from_tomorrow(self):
         import datetime as dt
         from dispatch_workflow import TAIPEI

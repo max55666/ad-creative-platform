@@ -99,6 +99,10 @@ class DispatchWorkflow:
         with self.s['connect']() as c:
             rows = c.execute('''SELECT c.* FROM cases c JOIN pickup_outbox p ON p.case_id=c.id
                 WHERE p.state='synced' OR p.synced_at<>'' ORDER BY c.created,c.id''').fetchall()
+            gate = self.s.get('pickup_dispatch_gate')
+            if gate:
+                return [row['id'] for row in rows if gate(dict(row), c) in
+                        ('ready', 'payment_sync_pending', 'payment_refresh_pending')]
         return [row['id'] for row in rows if self.s['pickup_eligible'](dict(row))]
 
     def enrollment(self, case_id):
@@ -111,6 +115,10 @@ class DispatchWorkflow:
             return gate(dict(row),c) if gate else 'blocked'
 
     def cases_allowed(self, ids):
+        # Listing an enrolled trip must survive a routine payment refresh. Actual
+        # dispatch writes retain the separate strict payment check in the server.
+        if self.s.get('pickup_dispatch_gate'):
+            return set(ids).issubset(self.allowlist())
         checker=self.s.get('pickup_cases_allowed')
         return checker(ids) is True if checker else True
 
