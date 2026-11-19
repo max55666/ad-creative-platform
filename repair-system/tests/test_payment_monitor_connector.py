@@ -73,6 +73,7 @@ class ConnectorTests(unittest.TestCase):
             'state': 'state' * 8, 'code_challenge': self.challenge, 'code_challenge_method': 'S256'})
         self.m.authorize(h, query)
         self.assertEqual(h.response_headers['Referrer-Policy'], 'same-origin')
+        self.assertIn("form-action 'self' https://chatgpt.com;", h.response_headers['Content-Security-Policy'])
         import re
         request_id = re.search(r'name="request" value="([^"]+)"', h.wfile.getvalue().decode())[1]
         consent = Handler({'request': request_id}, form=True, admin=True, origin=self.base)

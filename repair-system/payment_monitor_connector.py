@@ -153,7 +153,7 @@ class MonitorConnector:
         # this form can cause browsers to serialize that Origin as "null".
         for k, v in [('Content-Type', 'text/html; charset=utf-8'), ('Cache-Control', 'no-store'),
                      ('Referrer-Policy', 'same-origin'), ('X-Frame-Options', 'DENY'),
-                     ('Content-Security-Policy', "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
+                     ('Content-Security-Policy', "default-src 'none'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'; base-uri 'none'"),
                      *(headers or {}).items()]:
             handler.send_header(k, v)
         handler.end_headers()
