@@ -149,8 +149,10 @@ class MonitorConnector:
                '<meta name="viewport" content="width=device-width,initial-scale=1">'
                '<title>PetPivot 唯讀巡檢授權</title><body>' + body + '</body></html>').encode()
         handler.send_response(status)
+        # Preserve same-origin POST Origin for the CSRF check. no-referrer on
+        # this form can cause browsers to serialize that Origin as "null".
         for k, v in [('Content-Type', 'text/html; charset=utf-8'), ('Cache-Control', 'no-store'),
-                     ('Referrer-Policy', 'no-referrer'), ('X-Frame-Options', 'DENY'),
+                     ('Referrer-Policy', 'same-origin'), ('X-Frame-Options', 'DENY'),
                      ('Content-Security-Policy', "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),
                      *(headers or {}).items()]:
             handler.send_header(k, v)
@@ -367,7 +369,7 @@ class MonitorConnector:
     def handle_get(self, handler, path, query):
         if path in ('/.well-known/oauth-protected-resource' + MCP, '/.well-known/oauth-protected-resource'):
             handler.send(200, {'resource': self.resource, 'authorization_servers': [self.base], 'scopes_supported': [SCOPE]})
-        elif path in ('/.well-known/oauth-authorization-server', '/.well-known/openid-configuration'):
+        elif path == '/.well-known/oauth-authorization-server':
             handler.send(200, self.metadata())
         elif path == PREFIX + '/authorize':
             try:

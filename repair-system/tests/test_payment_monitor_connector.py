@@ -72,6 +72,7 @@ class ConnectorTests(unittest.TestCase):
             'response_type': 'code', 'scope': SCOPE, 'resource': self.m.resource,
             'state': 'state' * 8, 'code_challenge': self.challenge, 'code_challenge_method': 'S256'})
         self.m.authorize(h, query)
+        self.assertEqual(h.response_headers['Referrer-Policy'], 'same-origin')
         import re
         request_id = re.search(r'name="request" value="([^"]+)"', h.wfile.getvalue().decode())[1]
         consent = Handler({'request': request_id}, form=True, admin=True, origin=self.base)
