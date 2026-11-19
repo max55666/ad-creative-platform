@@ -13,6 +13,7 @@ import re
 import sqlite3
 import uuid
 
+from shipping_policy import stored_pickup_fee
 from service_desk_reconciliation import _valid_repair_allocation
 
 
@@ -228,7 +229,7 @@ class PaymentSheetSync:
             if (quote['status'] != 'active' or type(quote['version']) is not int
                     or quote['version'] != row['version'] or quote['version'] < 1
                     or any(type(val) is not int or not 0 <= val <= 100350 for val in (fee, pickup, due))
-                    or pickup != (350 if data.get('pickup') is True else 0)
+                    or pickup != stored_pickup_fee(data)
                     or fee + pickup != due or values.get('currency') != 'TWD'
                     or values.get('caseNumber') != number or values.get('name') != name):
                 raise ValueError('目前報價內容不完整，無法同步付款狀態')

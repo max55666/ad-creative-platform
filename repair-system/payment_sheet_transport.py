@@ -61,7 +61,7 @@ def validate_payment(record):
     for key in ('repairFee', 'pickupFee', 'amountDue', 'amountPaid'):
         if not _integer(record[key]):
             raise ValueError('invalid_payment')
-    if (record['pickupFee'] not in (0, 350)
+    if (record['pickupFee'] not in (0, 350, 700)
             or not _integer(record['repairFee'] + record['pickupFee'])
             or record['amountDue'] != record['repairFee'] + record['pickupFee']
             or record['amountPaid'] > record['amountDue']):

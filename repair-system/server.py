@@ -6,6 +6,7 @@ from contextlib import contextmanager, closing
 from line_support import load_private_config, verify_id_token, validate_webhook_signature, inspect_bot, get_profile, send_push, send_reply, get_webhook_endpoint, set_webhook_endpoint, get_group_summary, send_group_text
 from cloud_support import build_payload, init_queue, validate_endpoint, validate_secret, format_sheet_phone, PRIMARY_SHEET_ID, PICKUP_SHEET_ID, PICKUP_SHEET_GID
 from dispatch_workflow import DispatchWorkflow, init_tables as init_dispatch_workflow, cancel_for_group as cancel_dispatch_workflow
+from shipping_policy import application_time, policy as shipping_policy, NEW_VERSION
 from address_support import public_address_data, validate_case_addresses
 
 ROOT = Path(__file__).parent
@@ -1091,7 +1092,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200,{'ok':True})
         if DEMO and self.headers.get('Cf-Connecting-IP'):
             return self.send(503,{'error':'LINE 測試服務設定中，尚未開放申請'})
-        if path=='/api/config': return self.send(200,{'demo':DEMO,'oa':OA,'loginReady':bool(CID and (SECRET or LIFF_ID)),'loginUrl':BASE+'/auth/line','liffId':LIFF_ID,'webhookReady':bool(MESSAGE_SECRET and BOT_UID),'officialEntryRequired':True,'autoLoginPaused':self.auto_login_paused(),'statuses':STATUS})
+        if path=='/api/config': return self.send(200,{'shippingPolicy':shipping_policy(),'demo':DEMO,'oa':OA,'loginReady':bool(CID and (SECRET or LIFF_ID)),'loginUrl':BASE+'/auth/line','liffId':LIFF_ID,'webhookReady':bool(MESSAGE_SECRET and BOT_UID),'officialEntryRequired':True,'autoLoginPaused':self.auto_login_paused(),'statuses':STATUS})
         if path=='/api/me':
             u=self.user()
             public_keys=('id','name','displayName','admin','lineVerified','expires','officialEntry','officialEntryExpiresAt')
@@ -1420,17 +1421,23 @@ class Handler(BaseHTTPRequestHandler):
             clean={k:str(data.get(k,'')) for k in ['name','phone','email','model','serial','order','purchase','problem','extra','shipping','pickupAddress','returnAddress']}
             clean.update({'order':order_number,'orderChoice':order_choice,
                           'repairPolicy':'保固外付費維修' if order_choice == 'missing' else '待核對保固'})
+            submitted_at=application_time()
+            terms=shipping_policy(submitted_at)
+            now=submitted_at.strftime('%Y-%m-%d %H:%M:%S'); day=submitted_at.strftime('%Y%m%d')
             clean.update({'shipping':shipping,
-                          'pickupFeeTwd':350 if shipping == '由客服派遣物流回收' else None,
+                          'pickupFeeTwd':terms['pickupFee'] if shipping == '由客服派遣物流回收' else None,
                           'shippingNote':'親自送回時，請先將商品妥善裝箱，並交由管理室代收。為維護商品安全，未裝箱之商品，管理室恕無法代收，敬請見諒。\n若技師評估包裝強度不足，可能於運送途中造成商品損壞，為保障商品安全，我們將於維修完成後通知您親自領回。\n若您了解上述風險後，仍選擇以寄送方式領回，運送途中之商品損壞風險須由您自行承擔，本公司恕無法負擔相關損壞之賠償責任。' if shipping == '親自送回' else ''})
-            clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':'shipping-2026-10-29-v7'})
+            if terms['dropoffSelfCollect'] and shipping == '親自送回':
+                clean['shippingNote']='親自送回時，請妥善裝箱並交由管理室代收。維修完成後將通知客戶自行領回，不安排寄回。'
+            clean.update({'rules':[True]*4,'checks':[True]*4,'privacy':True,'rulesVersion':terms['version']})
             if PAYMENTS is not None and PAYMENTS.new_cases_enabled is True:
                 clean['paymentWorkflow']=PAYMENT_WORKFLOW
-            now=time.strftime('%Y-%m-%d %H:%M:%S'); day=time.strftime('%Y%m%d')
             with connect() as c:
                 c.execute('BEGIN IMMEDIATE')
                 old=c.execute('SELECT * FROM cases WHERE user_id=? AND request_id=?',(u['id'],rid)).fetchone()
                 if old: return self.send(200,{'case':self.case_dict(old)})
+                if terms['version']==NEW_VERSION and data.get('shippingPolicyVersion')!=terms['version']:
+                    return self.send(409,{'error':'收送規範已於 11/30 生效，請重新確認寄送方式及費用後送出。','code':'SHIPPING_POLICY_CHANGED','shippingPolicy':terms})
                 if c.execute('SELECT 1 FROM deleted_case_requests WHERE user_id=? AND request_id=?',(u['id'],rid)).fetchone():
                     return self.send(409,{'error':'此測試申請已清理，請重新開啟表單後再送出。','code':'case_cleaned'})
                 try:

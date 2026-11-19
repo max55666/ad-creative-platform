@@ -14,6 +14,7 @@ import sqlite3
 import unicodedata
 import uuid
 
+from shipping_policy import stored_pickup_fee
 from order_matching import rank_candidates, normalize_phone
 
 
@@ -358,7 +359,7 @@ class ServiceDesk:
                 '\n\n維修費：NT$0\n派車回收費：NT$0\n應付合計：NT$0\n\n本次核定無須付款，請依客服指示安排送修。\n\n如需補充資訊，請直接在此聊天室留言並附上案件編號。')
         else:
             message = ('【維修費用付款通知】\n\n送修編號：' + case['caseNumber'] + '\n申請人：' + case['name'] +
-                '\n\n維修費：NT$' + format(fee, ',') + '\n派車回收費：NT$' + format(pickup_fee, ',') +
+                '\n\n維修費：NT$' + format(fee, ',') + ('\n收送運費（收件350＋寄回350）：NT$' if pickup_fee == 700 else '\n派車回收費：NT$') + format(pickup_fee, ',') +
                 '\n應付合計：NT$' + format(total, ',') + '\n\n請至下方一元賣場付款：\n' + PAYMENT_URL +
                 '\n購買數量請填「' + str(total) + '」，結帳總額應為 NT$' + format(total, ',') +
                 '。\n\n【下單必填】\n請在「訂單備註」貼上以下兩行：\n\n' + remark +
@@ -440,7 +441,7 @@ class ServiceDesk:
             if real_checks and case['latestQuote'] and c.execute("SELECT 1 FROM wb_real_order_checks WHERE quote_id=? AND outcome='matched_internal_only' LIMIT 1",
                     (case['latestQuote']['id'],)).fetchone():
                 raise ValueError('此報價已有真實訂單配對或退款追蹤，不能直接改價，請先交由主管處理')
-            pickup_fee = 350 if case['pickup'] else 0
+            pickup_fee = stored_pickup_fee(case)
             total = fee + pickup_fee
             message, remark = self._message(case, fee, pickup_fee, total)
             version, quote_id = case['version'] + 1, _new('WQ-')

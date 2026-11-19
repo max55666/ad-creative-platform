@@ -61,7 +61,7 @@ class _ProductionHttpSender(LineTestSender):
             if (value.get('status') != 'active' or value.get('paymentStatus') not in
                     ('awaiting_payment', 'no_payment_required')
                     or type(fee) is not int or not 0 <= fee <= 100000
-                    or type(pickup) is not int or pickup not in (0, 350)
+                    or type(pickup) is not int or pickup not in (0, 350, 700)
                     or fee + pickup != total
                     or (value.get('paymentStatus') == 'no_payment_required') != (total == 0)):
                 raise ValueError('請先核定目前報價')
@@ -70,7 +70,7 @@ class _ProductionHttpSender(LineTestSender):
                 raise ValueError('下單備註與案件不符')
             text = ('【維修費用付款通知】\n維修編號：' + number + '\n申請人：' + name
                 + '\n維修金額：NT$' + format(fee, ',')
-                + '\n派車回收費：NT$' + format(pickup, ',')
+                + ('\n收送運費（收件350＋寄回350）：NT$' if pickup == 700 else '\n派車回收費：NT$') + format(pickup, ',')
                 + '\n應付合計：NT$' + format(total, ','))
             if not total:
                 return value['id'], {'to': self._allowed_user_id, 'messages': [

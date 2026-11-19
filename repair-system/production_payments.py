@@ -20,6 +20,7 @@ import time
 import uuid
 from urllib.parse import parse_qs, urlsplit
 
+from shipping_policy import application_pickup_fee, stored_pickup_fee
 from service_desk import ServiceDesk
 from service_desk_reconciliation import RealOrderReconciliation
 from payment_sheet_sync import PaymentSheetSync
@@ -255,7 +256,7 @@ class ProductionPayments:
             'phone': normalize_phone(data.get('phone', '')) or data.get('phone', ''),
             'address': address or '', 'model': data.get('model', ''),
             'pickup': pickup, 'lineLinked': True, 'lineName': case.get('line_display_name') or data.get('name', ''),
-            'source': 'snapshot'}
+            'source': 'snapshot', 'pickupFeeTwd': application_pickup_fee(data.get('shipping'), case['created'])}
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             prior = c.execute('SELECT * FROM wb_prod_links WHERE real_id=?', (real_id,)).fetchone()
@@ -754,6 +755,7 @@ class ProductionPayments:
         result = {'id': real_id, 'name': data.get('name', ''), 'phone': data.get('phone', ''),
             'model': data.get('model', ''), 'shipping': data.get('shipping', ''), 'address': data.get('pickupAddress') or data.get('returnAddress', ''),
             'lineName': case.get('line_display_name') or data.get('name', ''),
+            'pickupFeeTwd': application_pickup_fee(data.get('shipping'), case['created']),
             'managed': 'paymentWorkflow' in data, 'legacy': 'paymentWorkflow' not in data,
             'version': 0, 'quote': None, 'payment': None, 'quoteHistory': [], 'audit': [],
             'receipts': [], 'refundNotices': [], 'notifications': [], 'lastCheck': None,
@@ -822,6 +824,7 @@ class ProductionPayments:
                           and link['quote_status'] == 'active' else '狀態更新中')
             selected.append({'id': row['id'], 'name': data.get('name', ''), 'phone': data.get('phone', ''),
                 'model': data.get('model', ''), 'shipping': data.get('shipping', ''),
+                'pickupFeeTwd': application_pickup_fee(data.get('shipping'), row['created']),
                 'managed': 'paymentWorkflow' in data, 'legacy': 'paymentWorkflow' not in data,
                 'payment': {'paymentStatus': status} if 'paymentWorkflow' in data else None})
         return {'enabled': True, 'mode': 'production', 'newCasesEnabled': self.new_cases_enabled,
@@ -929,7 +932,7 @@ class ProductionPayments:
                 if payload['warranty'] is True and not self.warranty_policy(wb)['warrantyConfirmationAllowed']:
                     raise ValueError('未提供原購買訂單的案件一律屬保固外；可核定免收費，但不能勾選保固內')
                 case = self.desk.get_case(wb)['case']
-                if type(payload['repairFee']) is not int or payload['repairFee'] + (350 if case['pickup'] else 0) > 100000:
+                if type(payload['repairFee']) is not int or payload['repairFee'] + stored_pickup_fee(case) > 100000:
                     raise ValueError('本次應付合計不可超過 100,000 元')
                 result = self.desk.approve_quote(wb, payload,
                     allow_free_requote=self.can_requote_free(wb))

@@ -128,7 +128,7 @@ def validate_record(record):
             raise ValueError('雲端案件時間格式錯誤')
     if record['lineSummaryReceivedAt'] and not _valid_timestamp(record['lineSummaryReceivedAt']):
         raise ValueError('雲端案件時間格式錯誤')
-    if record['pickupFeeTwd'] not in ('', '350'):
+    if record['pickupFeeTwd'] not in ('', '350', '700'):
         raise ValueError('雲端回收費用格式錯誤')
     if len(json.dumps(record, ensure_ascii=False).encode('utf-8')) > MAX_BODY - 500:
         raise ValueError('雲端案件內容過長')
