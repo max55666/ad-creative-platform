@@ -67,6 +67,7 @@ SERVICE_STARTED = False
 SERVICE_LOCK = threading.Lock()
 PAYMENTS = None
 PAYMENT_REVIEW = None
+PAYMENT_MONITOR = None
 PAYMENT_WORKFLOW = 'payment-v1'
 PAYMENT_REQUIRED_STATUSES = frozenset(('待收件','已收件','檢測中','維修中','待寄回','已寄回','已結案'))
 DISPATCH_TEST_WARNING = '【系統驗收測試｜請勿實際派車】'
@@ -1084,6 +1085,7 @@ class Handler(BaseHTTPRequestHandler):
         return d
     def do_GET(self):
         url=urllib.parse.urlparse(self.path); path=url.path
+        if PAYMENT_MONITOR and PAYMENT_MONITOR.handle_get(self,path,url.query): return
         if PAYMENTS and PAYMENTS.handle_get(self,path,url.query): return
         if path=='/healthz':
             try:
@@ -1236,6 +1238,7 @@ class Handler(BaseHTTPRequestHandler):
         if DEMO and self.headers.get('Cf-Connecting-IP'):
             return self.send(503,{'error':'LINE 測試服務設定中，尚未開放申請'})
         path=urllib.parse.urlparse(self.path).path
+        if PAYMENT_MONITOR and PAYMENT_MONITOR.handle_post(self,path): return
         if path=='/api/line-webhook': return self.webhook()
         if not self.allowed_origin(): return self.send(403,{'error':'不允許的來源'})
         try:
@@ -1632,7 +1635,7 @@ WORKFLOW = DispatchWorkflow(globals())
 
 def start_service():
     """Initialize once per Python process; imports never start network/worker IO."""
-    global SERVICE_STARTED,BOT_UID,PAYMENTS,PAYMENT_REVIEW
+    global SERVICE_STARTED,BOT_UID,PAYMENTS,PAYMENT_REVIEW,PAYMENT_MONITOR
     with SERVICE_LOCK:
         if SERVICE_STARTED: return
         validate_service_config()
@@ -1642,6 +1645,9 @@ def start_service():
         from production_payments import start_payments
         PAYMENTS=start_payments(globals())
         if PAYMENTS is not None:
+            from payment_monitor_connector import MonitorConnector
+            PAYMENT_MONITOR=MonitorConnector(globals())
+            PAYMENT_MONITOR.init()
             from pickup_payment_review import PickupPaymentReview
             PAYMENT_REVIEW=PickupPaymentReview(globals(),PAYMENTS)
             PAYMENT_REVIEW.init()
