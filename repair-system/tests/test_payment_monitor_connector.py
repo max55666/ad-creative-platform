@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from urllib.parse import urlencode, urlsplit, parse_qs
 
-from payment_monitor_connector import MonitorConnector, SCOPE, MCP, PREFIX, digest
+from payment_monitor_connector import MonitorConnector, SCOPE, MCP, PREFIX, digest, inventory_signature
 from payment_monitor_rules import find_candidates
 
 
@@ -204,6 +204,15 @@ class ConnectorTests(unittest.TestCase):
         self.server['PAYMENTS'].state = lambda: {'cases': [{'id': 'missing'}]}
         with self.assertRaisesRegex(ValueError, 'case_inventory_incomplete'):
             self.m.collect()
+
+    def test_inventory_comparison_ignores_queue_but_detects_payment_changes(self):
+        from copy import deepcopy
+        case = {'id': 'R1', 'payment': {'paymentStatus': '待付款', 'sync': {'nextAttempt': 1}}}
+        changed = deepcopy(case)
+        changed['payment']['sync']['nextAttempt'] = 2
+        self.assertEqual(inventory_signature([case], []), inventory_signature([changed], []))
+        changed['payment']['paymentStatus'] = '已付款'
+        self.assertNotEqual(inventory_signature([case], []), inventory_signature([changed], []))
 
 
 if __name__ == '__main__':

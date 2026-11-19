@@ -44,6 +44,29 @@ def allowed_callback(value):
         r'https://chatgpt\.com/connector/oauth/[A-Za-z0-9_-]{8,128}', value)))
 
 
+def inventory_signature(cases, repairs):
+    """Compare eligibility evidence, excluding mutable queue/audit display fields."""
+    def select(row, fields):
+        return {key: row.get(key) for key in fields}
+    payments = []
+    for case in cases:
+        payments.append({
+            **select(case, ('id', 'name', 'phone', 'shipping', 'managed')),
+            'quote': select(case.get('quote') or {}, ('id', 'status', 'paymentStatus', 'total', 'currency', 'version', 'createdAt', 'acceptedOrderId')),
+            'payment': select(case.get('payment') or {}, ('paymentStatus', 'amountDue', 'quoteVersion', 'paymentOrderNumber')),
+            'acceptedOrders': [q.get('acceptedOrderId') for q in case.get('quoteHistory', [])],
+            'receipts': [r.get('order_number') for r in case.get('receipts', [])],
+            'refunds': [r.get('order_number') for r in case.get('refundNotices', [])]})
+    sources = []
+    for repair in repairs:
+        data = repair.get('data') or {}
+        if isinstance(data, str):
+            data = json.loads(data)
+        sources.append({**select(repair, ('id', 'status')), 'data': select(data, ('name', 'shipping'))})
+    return json.dumps([sorted(payments, key=lambda r: r['id']), sorted(sources, key=lambda r: r['id'])],
+                      sort_keys=True, ensure_ascii=False, allow_nan=False)
+
+
 class MonitorConnector:
     def __init__(self, server, clock=time.time):
         self.s, self.clock = server, clock
@@ -264,7 +287,10 @@ class MonitorConnector:
             if fetched.get('status') != 'ok' or fetched.get('truncated') is not False or not isinstance(fetched.get('orders'), list):
                 raise ValueError('shopline_orders_incomplete')
             # Reload inventory after the provider request to detect concurrent case/payment changes.
-            if state.get('cases') != payments.state().get('cases'):
+            refreshed = payments.state().get('cases')
+            with self.s['connect']() as c:
+                refreshed_repairs = [dict(r) for r in c.execute('SELECT * FROM cases')]
+            if not isinstance(refreshed, list) or inventory_signature(cases, repairs) != inventory_signature(refreshed, refreshed_repairs):
                 raise ValueError('case_inventory_changed')
             found, eligible = find_candidates(cases, repairs, fetched['orders'])
             public_fields = {'caseNumber', 'name', 'shippingMethod', 'requiresPickup', 'quoteVersion',
@@ -327,8 +353,12 @@ class MonitorConnector:
                 try:
                     report = self.collect()
                     result = {'content': [{'type': 'text', 'text': json.dumps(report, ensure_ascii=False)}], 'structuredContent': report}
-                except Exception:
-                    result = {'isError': True, 'content': [{'type': 'text', 'text': '巡檢未完整完成，不能判定為沒有待確認案件。未自動配對付款、派車或發 LINE。'}]}
+                except Exception as scan_error:
+                    safe_codes = {'scan_busy', 'scan_rate_limited', 'payments_unavailable',
+                        'case_inventory_incomplete', 'case_inventory_changed', 'shopline_orders_incomplete'}
+                    code = str(scan_error) if isinstance(scan_error, ValueError) and str(scan_error) in safe_codes else 'monitor_unavailable'
+                    result = {'isError': True, 'structuredContent': {'status': 'failed', 'code': code},
+                        'content': [{'type': 'text', 'text': '巡檢未完整完成，不能判定為沒有待確認案件。未自動配對付款、派車或發 LINE。'}]}
         else:
             result = None
             error = {'code': -32601, 'message': 'Method not found'}
